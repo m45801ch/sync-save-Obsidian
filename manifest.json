@@ -1,0 +1,11 @@
+{
+  "id": "sync-save",
+  "name": "Sync Save",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "在任何雲端之間同步您的筆記庫 — S3、WebDAV、Dropbox、OneDrive、Google Drive 等",
+  "author": "Sync Save",
+  "authorUrl": "",
+  "fundingUrl": "",
+  "isDesktopOnly": false
+}

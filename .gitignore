@@ -1,0 +1,6 @@
+node_modules/
+.obsidian/
+.DS_Store
+*.tmp
+base64_icons.json
+reconstruct_settings.py
