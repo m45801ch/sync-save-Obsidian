@@ -2768,6 +2768,9 @@ var SyncSavePlugin = class extends import_obsidian5.Plugin {
       googledrive: { ...DEFAULT_SETTINGS.googledrive, ...data.googledrive },
       box: { ...DEFAULT_SETTINGS.box, ...data.box }
     };
+    if (!this.settings.box.clientId && !this.settings.box.clientSecret) {
+      this.settings.box.authType = "one_click";
+    }
   }
   async saveSettings() {
     await this.saveData(this.settings);

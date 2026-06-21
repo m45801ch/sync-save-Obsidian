@@ -305,6 +305,11 @@ export default class SyncSavePlugin extends Plugin {
       googledrive: { ...DEFAULT_SETTINGS.googledrive, ...data.googledrive },
       box: { ...DEFAULT_SETTINGS.box, ...data.box },
     };
+
+    // 遷移設定：如果沒有自訂 Box 金鑰，預設強制切換為「一鍵連結」
+    if (!this.settings.box.clientId && !this.settings.box.clientSecret) {
+      this.settings.box.authType = "one_click";
+    }
   }
 
   async saveSettings(): Promise<void> {
