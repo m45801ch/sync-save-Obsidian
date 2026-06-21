@@ -7,6 +7,7 @@ interface BoxConfig {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
+  authHelperUrl?: string;
 }
 
 class RequestUrlResponseWrapper {
@@ -136,33 +137,55 @@ export class BoxProvider extends CloudProvider {
     if (!this.config.refreshToken) return false;
 
     try {
-      const url = "https://api.box.com/oauth2/token";
-      const params = new URLSearchParams();
-      params.append("grant_type", "refresh_token");
-      params.append("refresh_token", this.config.refreshToken);
-      params.append("client_id", this.config.clientId);
-      params.append("client_secret", this.config.clientSecret);
+      if (this.config.clientId && this.config.clientSecret) {
+        const url = "https://api.box.com/oauth2/token";
+        const params = new URLSearchParams();
+        params.append("grant_type", "refresh_token");
+        params.append("refresh_token", this.config.refreshToken);
+        params.append("client_id", this.config.clientId);
+        params.append("client_secret", this.config.clientSecret);
 
-      const resp = await requestUrl({
-        url,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: params.toString(),
-        throw: false,
-      });
+        const resp = await requestUrl({
+          url,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: params.toString(),
+          throw: false,
+        });
 
-      if (resp.status === 200) {
-        const data = resp.json;
-        this.accessToken = data.access_token;
-        this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
-        this.config.refreshToken = data.refresh_token;
-        this.config.accessToken = data.access_token;
-        if (this.onTokenRefreshed) {
-          this.onTokenRefreshed();
+        if (resp.status === 200) {
+          const data = resp.json;
+          this.accessToken = data.access_token;
+          this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+          this.config.refreshToken = data.refresh_token;
+          this.config.accessToken = data.access_token;
+          if (this.onTokenRefreshed) {
+            this.onTokenRefreshed();
+          }
+          return true;
         }
-        return true;
+      } else {
+        const helperUrl = this.config.authHelperUrl || "https://sync-save-auth.vercel.app";
+        const url = `${helperUrl}/api/box/refresh`;
+        const resp = await requestUrl({
+          url: `${url}?refresh_token=${encodeURIComponent(this.config.refreshToken)}`,
+          method: "GET",
+          throw: false,
+        });
+
+        if (resp.status === 200) {
+          const data = resp.json;
+          this.accessToken = data.access_token;
+          this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+          this.config.refreshToken = data.refresh_token;
+          this.config.accessToken = data.access_token;
+          if (this.onTokenRefreshed) {
+            this.onTokenRefreshed();
+          }
+          return true;
+        }
       }
       return false;
     } catch (e) {

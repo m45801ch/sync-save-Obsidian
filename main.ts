@@ -24,8 +24,8 @@ interface SyncSaveSettings {
   webdav: { url: string; username: string; password: string; path: string };
   dropbox: { accessToken: string; appFolder: boolean };
   onedrive: { accessToken: string; useAppFolder: boolean };
-  googledrive: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string };
-  box: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string };
+  googledrive: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string; codeVerifier?: string };
+  box: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string; authHelperUrl?: string };
   encryptionPassword: string;
   syncOnSave: boolean;
   syncInterval: number;
@@ -45,8 +45,8 @@ const DEFAULT_SETTINGS: SyncSaveSettings = {
   webdav: { url: "", username: "", password: "", path: "SyncSave" },
   dropbox: { accessToken: "", appFolder: true },
   onedrive: { accessToken: "", useAppFolder: true },
-  googledrive: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "" },
-  box: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "" },
+  googledrive: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", codeVerifier: "" },
+  box: { authType: "one_click", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", authHelperUrl: "" },
   encryptionPassword: "",
   syncOnSave: false,
   syncInterval: 0,
@@ -99,6 +99,34 @@ export default class SyncSavePlugin extends Plugin {
         }
       })
     );
+
+    this.registerObsidianProtocolHandler("sync-save-auth", (params) => {
+      const { provider, access_token, refresh_token } = params;
+      if (!provider) {
+        new Notice("同步備份：無效的授權協議回調");
+        return;
+      }
+
+      if (provider === "box") {
+        if (access_token && refresh_token) {
+          this.settings.box.accessToken = access_token;
+          this.settings.box.refreshToken = refresh_token;
+          this.settings.box.authType = "oauth2";
+          this.settings.box.clientId = "";
+          this.settings.box.clientSecret = "";
+          this.saveSettings();
+          new Notice("同步備份：Box 雲端一鍵授權成功！");
+          
+          // 重新整理目前顯示的設定頁面
+          const setting = (this.app as any).setting;
+          if (setting && setting.activeTab && setting.activeTab.id === this.manifest.id) {
+            setting.activeTab.display();
+          }
+        } else {
+          new Notice("同步備份：Box 一鍵授權失敗，未取得金鑰");
+        }
+      }
+    });
 
     if (this.settings.syncInterval > 0) {
       this.restartAutoSync();

@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import SyncSavePlugin from "../../main";
 import { BoxProvider } from "../providers/BoxProvider";
+import { generateCodeVerifier, generateCodeChallenge } from "../utils/pkce";
 
 const PROVIDER_ICONS = {
   s3: "data:image/png;base64,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",
@@ -297,130 +298,102 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
 
   private renderGoogleDriveSettings(container: HTMLElement): void {
     const s = this.plugin.settings.googledrive;
-    if (!s.authType) s.authType = "developer";
-
-    const authGroup = container.createDiv({ cls: "sync-form-group" });
-    authGroup.createDiv({ cls: "sync-form-label", text: "驗證方式" });
-    const authSelect = authGroup.createEl("select", { cls: "sync-input" });
-    const authOptions = [
-      { value: "developer", label: "臨時存取權杖 (Temporary Token - 60 分鐘過期)" },
-      { value: "oauth2", label: "用戶驗證 (OAuth 2.0 - 支援個人/免費帳號，永久自動更新)" },
-    ];
-    for (const opt of authOptions) {
-      const el = authSelect.createEl("option", { value: opt.value, text: opt.label });
-      if (opt.value === s.authType) el.selected = true;
-    }
-    authSelect.addEventListener("change", () => {
-      this.plugin.settings.googledrive.authType = authSelect.value;
+    this.inputField(container, "用戶端 ID (Client ID - 選填)", s.clientId || "", (v) => {
+      this.plugin.settings.googledrive.clientId = v;
       this.plugin.saveSettings();
-      this.display();
+    }, "留空將使用預設公開憑證");
+
+    this.inputField(container, "用戶端金鑰 (Client Secret - 選填)", s.clientSecret || "", (v) => {
+      this.plugin.settings.googledrive.clientSecret = v;
+      this.plugin.saveSettings();
+    }, "使用預設公開憑證時請留空", "password");
+
+    // 產生授權連結按鈕
+    const authLinkBtnGroup = container.createDiv();
+    authLinkBtnGroup.style.cssText = "margin: 8px 0; display: flex; gap: 8px;";
+    const genLinkBtn = authLinkBtnGroup.createEl("button", { cls: "sync-btn sync-btn-secondary", text: "1. 產生授權連結" });
+    genLinkBtn.addEventListener("click", async () => {
+      const clientId = s.clientId || "147064468840-cqaqbijf1g60e6k2sonu18rr8jt30gkh.apps.googleusercontent.com";
+      const verifier = generateCodeVerifier();
+      this.plugin.settings.googledrive.codeVerifier = verifier;
+      await this.plugin.saveSettings();
+
+      const challenge = await generateCodeChallenge(verifier);
+      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=http://localhost&scope=https://www.googleapis.com/auth/drive&access_type=offline&prompt=consent&code_challenge=${challenge}&code_challenge_method=S256`;
+      window.open(authUrl, "_blank");
     });
 
-    if (s.authType === "oauth2") {
-      this.inputField(container, "用戶端 ID (Client ID)", s.clientId || "", (v) => {
-        this.plugin.settings.googledrive.clientId = v;
-        this.plugin.saveSettings();
-      }, "輸入 Google Cloud 的 Client ID");
-
-      this.inputField(container, "用戶端金鑰 (Client Secret)", s.clientSecret || "", (v) => {
-        this.plugin.settings.googledrive.clientSecret = v;
-        this.plugin.saveSettings();
-      }, "輸入 Google Cloud 的 Client Secret", "password");
-
-      // 產生授權連結按鈕
-      const authLinkBtnGroup = container.createDiv();
-      authLinkBtnGroup.style.cssText = "margin: 8px 0; display: flex; gap: 8px;";
-      const genLinkBtn = authLinkBtnGroup.createEl("button", { cls: "sync-btn sync-btn-secondary", text: "1. 產生授權連結" });
-      genLinkBtn.addEventListener("click", () => {
-        if (!s.clientId) {
-          new Notice("請先填入 Client ID");
-          return;
+    // 授權碼輸入框與啟用按鈕
+    let authCode = "";
+    const codeGroup = container.createDiv({ cls: "sync-form-group" });
+    codeGroup.createDiv({ cls: "sync-form-label", text: "2. 授權碼 (Authorization Code)" });
+    const codeRow = codeGroup.createDiv();
+    codeRow.style.cssText = "display: flex; gap: 8px;";
+    const codeInput = codeRow.createEl("input", {
+      cls: "sync-input",
+      type: "text",
+      attr: { placeholder: "將跳轉後網址中的 ?code= 後方的代碼貼在此處" },
+    });
+    codeInput.style.flex = "1";
+    codeInput.addEventListener("input", () => {
+      let val = codeInput.value.trim();
+      if (val.includes("code=")) {
+        const match = val.match(/[?&]code=([^&]+)/);
+        if (match) {
+          val = match[1];
         }
-        const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${s.clientId}&redirect_uri=http://localhost&scope=https://www.googleapis.com/auth/drive&access_type=offline&prompt=consent`;
-        window.open(authUrl, "_blank");
-      });
+      }
+      authCode = val;
+    });
 
-      // 授權碼輸入框與啟用按鈕
-      let authCode = "";
-      const codeGroup = container.createDiv({ cls: "sync-form-group" });
-      codeGroup.createDiv({ cls: "sync-form-label", text: "2. 授權碼 (Authorization Code)" });
-      const codeRow = codeGroup.createDiv();
-      codeRow.style.cssText = "display: flex; gap: 8px;";
-      const codeInput = codeRow.createEl("input", {
-        cls: "sync-input",
-        type: "text",
-        attr: { placeholder: "將跳轉後網址中的 ?code= 後方的代碼貼在此處" },
-      });
-      codeInput.style.flex = "1";
-      codeInput.addEventListener("input", () => {
-        let val = codeInput.value.trim();
-        if (val.includes("code=")) {
-          const match = val.match(/[?&]code=([^&]+)/);
-          if (match) {
-            val = match[1];
-          }
+    const exchangeBtn = codeRow.createEl("button", { cls: "sync-btn sync-btn-primary", text: "3. 啟用驗證" });
+    exchangeBtn.addEventListener("click", async () => {
+      let finalCode = authCode.trim();
+      if (finalCode.includes("code=")) {
+        const match = finalCode.match(/[?&]code=([^&]+)/);
+        if (match) {
+          finalCode = match[1];
         }
-        authCode = val;
-      });
+      }
+      try {
+        finalCode = decodeURIComponent(finalCode);
+      } catch {}
 
-      const exchangeBtn = codeRow.createEl("button", { cls: "sync-btn sync-btn-primary", text: "3. 啟用驗證" });
-      exchangeBtn.addEventListener("click", async () => {
-        let finalCode = authCode.trim();
-        if (finalCode.includes("code=")) {
-          const match = finalCode.match(/[?&]code=([^&]+)/);
-          if (match) {
-            finalCode = match[1];
-          }
+      if (!finalCode) {
+        new Notice("請先輸入授權碼");
+        return;
+      }
+      const provider = this.plugin.getProvider();
+      if (provider && provider.name === "Google Drive") {
+        const res = await (provider as any).authorizeWithCode(finalCode, s.codeVerifier);
+        new Notice(res.message);
+        if (res.success) {
+          this.plugin.settings.googledrive.codeVerifier = "";
+          this.plugin.saveSettings();
+          this.display();
         }
-        try {
-          finalCode = decodeURIComponent(finalCode);
-        } catch {}
+      }
+    });
 
-        if (!finalCode) {
-          new Notice("請先輸入授權碼");
-          return;
-        }
-        const provider = this.plugin.getProvider();
-        if (provider && provider.name === "Google Drive") {
-          const res = await (provider as any).authorizeWithCode(finalCode);
-          new Notice(res.message);
-          if (res.success) {
-            this.plugin.saveSettings();
-            this.display();
-          }
-        }
-      });
-
-      const helpText = container.createDiv({
-        cls: "sync-connection-status",
-        text: "說明：請先填入 Client ID 與 Client Secret，點擊「1. 產生授權連結」並於瀏覽器登入授權（若顯示安全性警告，請點擊「進階」並選擇繼續前往）。授權完成後網頁會跳轉至 `http://localhost/?code=...` 並顯示「無法連上這個網站」（此為正常現象），請複製網址列 `code=` 後方的代碼，貼到下方輸入框點擊「3. 啟用驗證」即可完成永久綁定與自動刷新。",
-      });
-      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    } else {
-      this.inputField(container, "存取權杖", s.accessToken, (v) => {
-        this.plugin.settings.googledrive.accessToken = v;
-        this.plugin.saveSettings();
-      }, "ya29...");
-
-      const helpText = container.createDiv({
-        cls: "sync-connection-status",
-        text: "前往 https://console.cloud.google.com/apis/credentials 取得臨時授權權杖",
-      });
-      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    }
+    const helpText = container.createDiv({
+      cls: "sync-connection-status",
+      text: "說明：此為個人開發工具，若在授權時看見「Google 未驗證」警告，請點選「進階」並選擇「繼續前往」，此屬正常現象。\n\n預設使用 PKCE 免金鑰流程。點擊「1. 產生授權連結」並於瀏覽器登入授權。授權完成後網頁會跳轉至 `http://localhost/?code=...` 並顯示「無法連上這個網站」（此為正常現象），請複製網址列 `code=` 後方的代碼，貼到下方輸入框點擊「3. 啟用驗證」即可完成綁定與自動刷新。亦可自訂輸入 Client ID/Secret 進行驗證。",
+    });
+    helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted); white-space: pre-line;";
   }
 
   private renderBoxSettings(container: HTMLElement): void {
     const s = this.plugin.settings.box;
-    if (!s.authType) s.authType = "developer";
+    if (!s.authType) s.authType = "one_click";
 
     const authGroup = container.createDiv({ cls: "sync-form-group" });
     authGroup.createDiv({ cls: "sync-form-label", text: "驗證方式" });
     const authSelect = authGroup.createEl("select", { cls: "sync-input" });
     const authOptions = [
+      { value: "one_click", label: "一鍵連結 (One-Click OAuth2 - 推薦，免輸入金鑰)" },
       { value: "developer", label: "開發者權杖 (Developer Token - 60 分鐘過期)" },
       { value: "client_credentials", label: "用戶端憑證 (Client Credentials - 需 Enterprise 企業帳號)" },
-      { value: "oauth2", label: "用戶驗證 (OAuth 2.0 - 支援個人/免費帳號，永久自動更新)" },
+      { value: "oauth2", label: "用戶自訂驗證 (OAuth 2.0 - 自行輸入 Client ID 與 Secret)" },
     ];
     for (const opt of authOptions) {
       const el = authSelect.createEl("option", { value: opt.value, text: opt.label });
@@ -432,7 +405,47 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
       this.display();
     });
 
-    if (s.authType === "client_credentials") {
+    if (s.authType === "one_click") {
+      this.inputField(container, "授權中繼伺服器網址 (Auth Helper URL - 選填)", s.authHelperUrl || "", (v) => {
+        this.plugin.settings.box.authHelperUrl = v;
+        this.plugin.saveSettings();
+      }, "https://sync-save-auth.vercel.app");
+
+      const btnGroup = container.createDiv();
+      btnGroup.style.cssText = "margin: 12px 0; display: flex; flex-direction: column; gap: 8px;";
+      
+      const connectBtn = btnGroup.createEl("button", { 
+        cls: "sync-btn sync-btn-primary", 
+        text: s.accessToken ? "重新連結 Box 帳號" : "連結至 Box 帳號" 
+      });
+      connectBtn.addEventListener("click", () => {
+        const helperUrl = s.authHelperUrl || "https://sync-save-auth.vercel.app";
+        const authUrl = `${helperUrl}/api/box/authorize`;
+        window.open(authUrl, "_blank");
+      });
+
+      if (s.accessToken) {
+        const disconnectBtn = btnGroup.createEl("button", { 
+          cls: "sync-btn sync-btn-secondary", 
+          text: "中斷 Box 連結" 
+        });
+        disconnectBtn.style.color = "var(--text-error)";
+        disconnectBtn.addEventListener("click", () => {
+          this.plugin.settings.box.accessToken = "";
+          this.plugin.settings.box.refreshToken = "";
+          this.plugin.saveSettings();
+          new Notice("已中斷 Box 連結");
+          this.display();
+        });
+      }
+
+      const helpText = container.createDiv({
+        cls: "sync-connection-status",
+        text: "說明：一鍵連結需要中繼伺服器。請先依照專案下的 auth-helper 說明部署至 Vercel，並將你部署的 URL 填入「授權中繼伺服器網址」（若使用預設中繼網址，請確認其已正確設定且非 404）。點擊「連結至 Box 帳號」完成後會自動回彈綁定。",
+      });
+      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
+
+    } else if (s.authType === "client_credentials") {
       this.inputField(container, "用戶端 ID (Client ID)", s.clientId || "", (v) => {
         this.plugin.settings.box.clientId = v;
         this.plugin.saveSettings();

@@ -1,12 +1,16 @@
 import { requestUrl, RequestUrlResponse } from "obsidian";
 import { CloudProvider, SyncFile } from "../sync/CloudProvider";
 
+const DEFAULT_GOOGLE_CLIENT_ID = "147064468840-cqaqbijf1g60e6k2sonu18rr8jt30gkh.apps.googleusercontent.com";
+const DEFAULT_GOOGLE_CLIENT_SECRET = "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";
+
 interface GoogleDriveConfig {
   authType: string;
   accessToken: string;
   clientId: string;
   clientSecret: string;
   refreshToken: string;
+  codeVerifier?: string;
 }
 
 class RequestUrlResponseWrapper {
@@ -56,14 +60,19 @@ export class GoogleDriveProvider extends CloudProvider {
     this.onTokenRefreshed = onTokenRefreshed;
   }
 
-  private async exchangeCodeForToken(code: string): Promise<{ success: boolean; message: string }> {
+  private async exchangeCodeForToken(code: string, codeVerifier?: string): Promise<{ success: boolean; message: string }> {
     try {
       const url = "https://oauth2.googleapis.com/token";
       const params = new URLSearchParams();
       params.append("grant_type", "authorization_code");
       params.append("code", code);
-      params.append("client_id", this.config.clientId);
-      params.append("client_secret", this.config.clientSecret);
+      params.append("client_id", this.config.clientId || DEFAULT_GOOGLE_CLIENT_ID);
+      params.append("client_secret", this.config.clientSecret || DEFAULT_GOOGLE_CLIENT_SECRET);
+      
+      const verifier = codeVerifier || this.config.codeVerifier;
+      if (verifier) {
+        params.append("code_verifier", verifier);
+      }
       params.append("redirect_uri", "http://localhost");
 
       const resp = await requestUrl({
@@ -105,8 +114,8 @@ export class GoogleDriveProvider extends CloudProvider {
       const params = new URLSearchParams();
       params.append("grant_type", "refresh_token");
       params.append("refresh_token", this.config.refreshToken);
-      params.append("client_id", this.config.clientId);
-      params.append("client_secret", this.config.clientSecret);
+      params.append("client_id", this.config.clientId || DEFAULT_GOOGLE_CLIENT_ID);
+      params.append("client_secret", this.config.clientSecret || DEFAULT_GOOGLE_CLIENT_SECRET);
 
       const resp = await requestUrl({
         url,
@@ -138,15 +147,15 @@ export class GoogleDriveProvider extends CloudProvider {
     }
   }
 
-  async authorizeWithCode(code: string): Promise<{ success: boolean; message: string }> {
-    if (!this.config.clientId || !this.config.clientSecret) {
-      return { success: false, message: "請先輸入 Client ID 與 Client Secret" };
+  async authorizeWithCode(code: string, codeVerifier?: string): Promise<{ success: boolean; message: string }> {
+    if (!this.config.clientId && !DEFAULT_GOOGLE_CLIENT_ID) {
+      return { success: false, message: "請先輸入 Client ID" };
     }
-    return this.exchangeCodeForToken(code);
+    return this.exchangeCodeForToken(code, codeVerifier);
   }
 
   private async checkAndRefreshToken(): Promise<void> {
-    if (this.config.authType === "oauth2") {
+    if (this.config.refreshToken) {
       if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
         const success = await this.refreshOAuth2Token();
         if (!success) {

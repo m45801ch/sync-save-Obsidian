@@ -895,6 +895,8 @@ var OneDriveProvider = class extends CloudProvider {
 
 // src/providers/GoogleDriveProvider.ts
 var import_obsidian2 = require("obsidian");
+var DEFAULT_GOOGLE_CLIENT_ID = "147064468840-cqaqbijf1g60e6k2sonu18rr8jt30gkh.apps.googleusercontent.com";
+var DEFAULT_GOOGLE_CLIENT_SECRET = "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";
 var RequestUrlResponseWrapper = class {
   constructor(res) {
     this.res = res;
@@ -935,14 +937,18 @@ var GoogleDriveProvider = class extends CloudProvider {
     this.config = config;
     this.onTokenRefreshed = onTokenRefreshed;
   }
-  async exchangeCodeForToken(code) {
+  async exchangeCodeForToken(code, codeVerifier) {
     try {
       const url = "https://oauth2.googleapis.com/token";
       const params = new URLSearchParams();
       params.append("grant_type", "authorization_code");
       params.append("code", code);
-      params.append("client_id", this.config.clientId);
-      params.append("client_secret", this.config.clientSecret);
+      params.append("client_id", this.config.clientId || DEFAULT_GOOGLE_CLIENT_ID);
+      params.append("client_secret", this.config.clientSecret || DEFAULT_GOOGLE_CLIENT_SECRET);
+      const verifier = codeVerifier || this.config.codeVerifier;
+      if (verifier) {
+        params.append("code_verifier", verifier);
+      }
       params.append("redirect_uri", "http://localhost");
       const resp = await (0, import_obsidian2.requestUrl)({
         url,
@@ -980,8 +986,8 @@ var GoogleDriveProvider = class extends CloudProvider {
       const params = new URLSearchParams();
       params.append("grant_type", "refresh_token");
       params.append("refresh_token", this.config.refreshToken);
-      params.append("client_id", this.config.clientId);
-      params.append("client_secret", this.config.clientSecret);
+      params.append("client_id", this.config.clientId || DEFAULT_GOOGLE_CLIENT_ID);
+      params.append("client_secret", this.config.clientSecret || DEFAULT_GOOGLE_CLIENT_SECRET);
       const resp = await (0, import_obsidian2.requestUrl)({
         url,
         method: "POST",
@@ -1010,14 +1016,14 @@ var GoogleDriveProvider = class extends CloudProvider {
       return false;
     }
   }
-  async authorizeWithCode(code) {
-    if (!this.config.clientId || !this.config.clientSecret) {
-      return { success: false, message: "\u8ACB\u5148\u8F38\u5165 Client ID \u8207 Client Secret" };
+  async authorizeWithCode(code, codeVerifier) {
+    if (!this.config.clientId && !DEFAULT_GOOGLE_CLIENT_ID) {
+      return { success: false, message: "\u8ACB\u5148\u8F38\u5165 Client ID" };
     }
-    return this.exchangeCodeForToken(code);
+    return this.exchangeCodeForToken(code, codeVerifier);
   }
   async checkAndRefreshToken() {
-    if (this.config.authType === "oauth2") {
+    if (this.config.refreshToken) {
       if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
         const success = await this.refreshOAuth2Token();
         if (!success) {
@@ -1444,31 +1450,52 @@ var BoxProvider = class extends CloudProvider {
     if (!this.config.refreshToken)
       return false;
     try {
-      const url = "https://api.box.com/oauth2/token";
-      const params = new URLSearchParams();
-      params.append("grant_type", "refresh_token");
-      params.append("refresh_token", this.config.refreshToken);
-      params.append("client_id", this.config.clientId);
-      params.append("client_secret", this.config.clientSecret);
-      const resp = await (0, import_obsidian3.requestUrl)({
-        url,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body: params.toString(),
-        throw: false
-      });
-      if (resp.status === 200) {
-        const data = resp.json;
-        this.accessToken = data.access_token;
-        this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1e3;
-        this.config.refreshToken = data.refresh_token;
-        this.config.accessToken = data.access_token;
-        if (this.onTokenRefreshed) {
-          this.onTokenRefreshed();
+      if (this.config.clientId && this.config.clientSecret) {
+        const url = "https://api.box.com/oauth2/token";
+        const params = new URLSearchParams();
+        params.append("grant_type", "refresh_token");
+        params.append("refresh_token", this.config.refreshToken);
+        params.append("client_id", this.config.clientId);
+        params.append("client_secret", this.config.clientSecret);
+        const resp = await (0, import_obsidian3.requestUrl)({
+          url,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body: params.toString(),
+          throw: false
+        });
+        if (resp.status === 200) {
+          const data = resp.json;
+          this.accessToken = data.access_token;
+          this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1e3;
+          this.config.refreshToken = data.refresh_token;
+          this.config.accessToken = data.access_token;
+          if (this.onTokenRefreshed) {
+            this.onTokenRefreshed();
+          }
+          return true;
         }
-        return true;
+      } else {
+        const helperUrl = this.config.authHelperUrl || "https://sync-save-auth.vercel.app";
+        const url = `${helperUrl}/api/box/refresh`;
+        const resp = await (0, import_obsidian3.requestUrl)({
+          url: `${url}?refresh_token=${encodeURIComponent(this.config.refreshToken)}`,
+          method: "GET",
+          throw: false
+        });
+        if (resp.status === 200) {
+          const data = resp.json;
+          this.accessToken = data.access_token;
+          this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1e3;
+          this.config.refreshToken = data.refresh_token;
+          this.config.accessToken = data.access_token;
+          if (this.onTokenRefreshed) {
+            this.onTokenRefreshed();
+          }
+          return true;
+        }
       }
       return false;
     } catch (e) {
@@ -1893,6 +1920,32 @@ var SyncStatusBar = class {
 
 // src/ui/SettingsTab.ts
 var import_obsidian4 = require("obsidian");
+
+// src/utils/pkce.ts
+function generateCodeVerifier() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  let result = "";
+  for (let i = 0; i < 64; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+async function generateCodeChallenge(verifier) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(verifier);
+  const hash = await window.crypto.subtle.digest("SHA-256", data);
+  return base64UrlEncode(hash);
+}
+function base64UrlEncode(buf) {
+  const uint8 = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < uint8.byteLength; i++) {
+    bin += String.fromCharCode(uint8[i]);
+  }
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// src/ui/SettingsTab.ts
 var PROVIDER_ICONS = {
   s3: "data:image/png;base64,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",
   box: "data:image/png;base64,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",
@@ -2133,121 +2186,93 @@ var SyncSaveSettingsTab = class extends import_obsidian4.PluginSettingTab {
   }
   renderGoogleDriveSettings(container) {
     const s = this.plugin.settings.googledrive;
-    if (!s.authType)
-      s.authType = "developer";
-    const authGroup = container.createDiv({ cls: "sync-form-group" });
-    authGroup.createDiv({ cls: "sync-form-label", text: "\u9A57\u8B49\u65B9\u5F0F" });
-    const authSelect = authGroup.createEl("select", { cls: "sync-input" });
-    const authOptions = [
-      { value: "developer", label: "\u81E8\u6642\u5B58\u53D6\u6B0A\u6756 (Temporary Token - 60 \u5206\u9418\u904E\u671F)" },
-      { value: "oauth2", label: "\u7528\u6236\u9A57\u8B49 (OAuth 2.0 - \u652F\u63F4\u500B\u4EBA/\u514D\u8CBB\u5E33\u865F\uFF0C\u6C38\u4E45\u81EA\u52D5\u66F4\u65B0)" }
-    ];
-    for (const opt of authOptions) {
-      const el = authSelect.createEl("option", { value: opt.value, text: opt.label });
-      if (opt.value === s.authType)
-        el.selected = true;
-    }
-    authSelect.addEventListener("change", () => {
-      this.plugin.settings.googledrive.authType = authSelect.value;
+    this.inputField(container, "\u7528\u6236\u7AEF ID (Client ID - \u9078\u586B)", s.clientId || "", (v) => {
+      this.plugin.settings.googledrive.clientId = v;
       this.plugin.saveSettings();
-      this.display();
+    }, "\u7559\u7A7A\u5C07\u4F7F\u7528\u9810\u8A2D\u516C\u958B\u6191\u8B49");
+    this.inputField(container, "\u7528\u6236\u7AEF\u91D1\u9470 (Client Secret - \u9078\u586B)", s.clientSecret || "", (v) => {
+      this.plugin.settings.googledrive.clientSecret = v;
+      this.plugin.saveSettings();
+    }, "\u4F7F\u7528\u9810\u8A2D\u516C\u958B\u6191\u8B49\u6642\u8ACB\u7559\u7A7A", "password");
+    const authLinkBtnGroup = container.createDiv();
+    authLinkBtnGroup.style.cssText = "margin: 8px 0; display: flex; gap: 8px;";
+    const genLinkBtn = authLinkBtnGroup.createEl("button", { cls: "sync-btn sync-btn-secondary", text: "1. \u7522\u751F\u6388\u6B0A\u9023\u7D50" });
+    genLinkBtn.addEventListener("click", async () => {
+      const clientId = s.clientId || "147064468840-cqaqbijf1g60e6k2sonu18rr8jt30gkh.apps.googleusercontent.com";
+      const verifier = generateCodeVerifier();
+      this.plugin.settings.googledrive.codeVerifier = verifier;
+      await this.plugin.saveSettings();
+      const challenge = await generateCodeChallenge(verifier);
+      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=http://localhost&scope=https://www.googleapis.com/auth/drive&access_type=offline&prompt=consent&code_challenge=${challenge}&code_challenge_method=S256`;
+      window.open(authUrl, "_blank");
     });
-    if (s.authType === "oauth2") {
-      this.inputField(container, "\u7528\u6236\u7AEF ID (Client ID)", s.clientId || "", (v) => {
-        this.plugin.settings.googledrive.clientId = v;
-        this.plugin.saveSettings();
-      }, "\u8F38\u5165 Google Cloud \u7684 Client ID");
-      this.inputField(container, "\u7528\u6236\u7AEF\u91D1\u9470 (Client Secret)", s.clientSecret || "", (v) => {
-        this.plugin.settings.googledrive.clientSecret = v;
-        this.plugin.saveSettings();
-      }, "\u8F38\u5165 Google Cloud \u7684 Client Secret", "password");
-      const authLinkBtnGroup = container.createDiv();
-      authLinkBtnGroup.style.cssText = "margin: 8px 0; display: flex; gap: 8px;";
-      const genLinkBtn = authLinkBtnGroup.createEl("button", { cls: "sync-btn sync-btn-secondary", text: "1. \u7522\u751F\u6388\u6B0A\u9023\u7D50" });
-      genLinkBtn.addEventListener("click", () => {
-        if (!s.clientId) {
-          new import_obsidian4.Notice("\u8ACB\u5148\u586B\u5165 Client ID");
-          return;
+    let authCode = "";
+    const codeGroup = container.createDiv({ cls: "sync-form-group" });
+    codeGroup.createDiv({ cls: "sync-form-label", text: "2. \u6388\u6B0A\u78BC (Authorization Code)" });
+    const codeRow = codeGroup.createDiv();
+    codeRow.style.cssText = "display: flex; gap: 8px;";
+    const codeInput = codeRow.createEl("input", {
+      cls: "sync-input",
+      type: "text",
+      attr: { placeholder: "\u5C07\u8DF3\u8F49\u5F8C\u7DB2\u5740\u4E2D\u7684 ?code= \u5F8C\u65B9\u7684\u4EE3\u78BC\u8CBC\u5728\u6B64\u8655" }
+    });
+    codeInput.style.flex = "1";
+    codeInput.addEventListener("input", () => {
+      let val = codeInput.value.trim();
+      if (val.includes("code=")) {
+        const match = val.match(/[?&]code=([^&]+)/);
+        if (match) {
+          val = match[1];
         }
-        const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${s.clientId}&redirect_uri=http://localhost&scope=https://www.googleapis.com/auth/drive&access_type=offline&prompt=consent`;
-        window.open(authUrl, "_blank");
-      });
-      let authCode = "";
-      const codeGroup = container.createDiv({ cls: "sync-form-group" });
-      codeGroup.createDiv({ cls: "sync-form-label", text: "2. \u6388\u6B0A\u78BC (Authorization Code)" });
-      const codeRow = codeGroup.createDiv();
-      codeRow.style.cssText = "display: flex; gap: 8px;";
-      const codeInput = codeRow.createEl("input", {
-        cls: "sync-input",
-        type: "text",
-        attr: { placeholder: "\u5C07\u8DF3\u8F49\u5F8C\u7DB2\u5740\u4E2D\u7684 ?code= \u5F8C\u65B9\u7684\u4EE3\u78BC\u8CBC\u5728\u6B64\u8655" }
-      });
-      codeInput.style.flex = "1";
-      codeInput.addEventListener("input", () => {
-        let val = codeInput.value.trim();
-        if (val.includes("code=")) {
-          const match = val.match(/[?&]code=([^&]+)/);
-          if (match) {
-            val = match[1];
-          }
+      }
+      authCode = val;
+    });
+    const exchangeBtn = codeRow.createEl("button", { cls: "sync-btn sync-btn-primary", text: "3. \u555F\u7528\u9A57\u8B49" });
+    exchangeBtn.addEventListener("click", async () => {
+      let finalCode = authCode.trim();
+      if (finalCode.includes("code=")) {
+        const match = finalCode.match(/[?&]code=([^&]+)/);
+        if (match) {
+          finalCode = match[1];
         }
-        authCode = val;
-      });
-      const exchangeBtn = codeRow.createEl("button", { cls: "sync-btn sync-btn-primary", text: "3. \u555F\u7528\u9A57\u8B49" });
-      exchangeBtn.addEventListener("click", async () => {
-        let finalCode = authCode.trim();
-        if (finalCode.includes("code=")) {
-          const match = finalCode.match(/[?&]code=([^&]+)/);
-          if (match) {
-            finalCode = match[1];
-          }
+      }
+      try {
+        finalCode = decodeURIComponent(finalCode);
+      } catch (e) {
+      }
+      if (!finalCode) {
+        new import_obsidian4.Notice("\u8ACB\u5148\u8F38\u5165\u6388\u6B0A\u78BC");
+        return;
+      }
+      const provider = this.plugin.getProvider();
+      if (provider && provider.name === "Google Drive") {
+        const res = await provider.authorizeWithCode(finalCode, s.codeVerifier);
+        new import_obsidian4.Notice(res.message);
+        if (res.success) {
+          this.plugin.settings.googledrive.codeVerifier = "";
+          this.plugin.saveSettings();
+          this.display();
         }
-        try {
-          finalCode = decodeURIComponent(finalCode);
-        } catch (e) {
-        }
-        if (!finalCode) {
-          new import_obsidian4.Notice("\u8ACB\u5148\u8F38\u5165\u6388\u6B0A\u78BC");
-          return;
-        }
-        const provider = this.plugin.getProvider();
-        if (provider && provider.name === "Google Drive") {
-          const res = await provider.authorizeWithCode(finalCode);
-          new import_obsidian4.Notice(res.message);
-          if (res.success) {
-            this.plugin.saveSettings();
-            this.display();
-          }
-        }
-      });
-      const helpText = container.createDiv({
-        cls: "sync-connection-status",
-        text: "\u8AAA\u660E\uFF1A\u8ACB\u5148\u586B\u5165 Client ID \u8207 Client Secret\uFF0C\u9EDE\u64CA\u300C1. \u7522\u751F\u6388\u6B0A\u9023\u7D50\u300D\u4E26\u65BC\u700F\u89BD\u5668\u767B\u5165\u6388\u6B0A\uFF08\u82E5\u986F\u793A\u5B89\u5168\u6027\u8B66\u544A\uFF0C\u8ACB\u9EDE\u64CA\u300C\u9032\u968E\u300D\u4E26\u9078\u64C7\u7E7C\u7E8C\u524D\u5F80\uFF09\u3002\u6388\u6B0A\u5B8C\u6210\u5F8C\u7DB2\u9801\u6703\u8DF3\u8F49\u81F3 `http://localhost/?code=...` \u4E26\u986F\u793A\u300C\u7121\u6CD5\u9023\u4E0A\u9019\u500B\u7DB2\u7AD9\u300D\uFF08\u6B64\u70BA\u6B63\u5E38\u73FE\u8C61\uFF09\uFF0C\u8ACB\u8907\u88FD\u7DB2\u5740\u5217 `code=` \u5F8C\u65B9\u7684\u4EE3\u78BC\uFF0C\u8CBC\u5230\u4E0B\u65B9\u8F38\u5165\u6846\u9EDE\u64CA\u300C3. \u555F\u7528\u9A57\u8B49\u300D\u5373\u53EF\u5B8C\u6210\u6C38\u4E45\u7D81\u5B9A\u8207\u81EA\u52D5\u5237\u65B0\u3002"
-      });
-      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    } else {
-      this.inputField(container, "\u5B58\u53D6\u6B0A\u6756", s.accessToken, (v) => {
-        this.plugin.settings.googledrive.accessToken = v;
-        this.plugin.saveSettings();
-      }, "ya29...");
-      const helpText = container.createDiv({
-        cls: "sync-connection-status",
-        text: "\u524D\u5F80 https://console.cloud.google.com/apis/credentials \u53D6\u5F97\u81E8\u6642\u6388\u6B0A\u6B0A\u6756"
-      });
-      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    }
+      }
+    });
+    const helpText = container.createDiv({
+      cls: "sync-connection-status",
+      text: "\u8AAA\u660E\uFF1A\u6B64\u70BA\u500B\u4EBA\u958B\u767C\u5DE5\u5177\uFF0C\u82E5\u5728\u6388\u6B0A\u6642\u770B\u898B\u300CGoogle \u672A\u9A57\u8B49\u300D\u8B66\u544A\uFF0C\u8ACB\u9EDE\u9078\u300C\u9032\u968E\u300D\u4E26\u9078\u64C7\u300C\u7E7C\u7E8C\u524D\u5F80\u300D\uFF0C\u6B64\u5C6C\u6B63\u5E38\u73FE\u8C61\u3002\n\n\u9810\u8A2D\u4F7F\u7528 PKCE \u514D\u91D1\u9470\u6D41\u7A0B\u3002\u9EDE\u64CA\u300C1. \u7522\u751F\u6388\u6B0A\u9023\u7D50\u300D\u4E26\u65BC\u700F\u89BD\u5668\u767B\u5165\u6388\u6B0A\u3002\u6388\u6B0A\u5B8C\u6210\u5F8C\u7DB2\u9801\u6703\u8DF3\u8F49\u81F3 `http://localhost/?code=...` \u4E26\u986F\u793A\u300C\u7121\u6CD5\u9023\u4E0A\u9019\u500B\u7DB2\u7AD9\u300D\uFF08\u6B64\u70BA\u6B63\u5E38\u73FE\u8C61\uFF09\uFF0C\u8ACB\u8907\u88FD\u7DB2\u5740\u5217 `code=` \u5F8C\u65B9\u7684\u4EE3\u78BC\uFF0C\u8CBC\u5230\u4E0B\u65B9\u8F38\u5165\u6846\u9EDE\u64CA\u300C3. \u555F\u7528\u9A57\u8B49\u300D\u5373\u53EF\u5B8C\u6210\u7D81\u5B9A\u8207\u81EA\u52D5\u5237\u65B0\u3002\u4EA6\u53EF\u81EA\u8A02\u8F38\u5165 Client ID/Secret \u9032\u884C\u9A57\u8B49\u3002"
+    });
+    helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted); white-space: pre-line;";
   }
   renderBoxSettings(container) {
     const s = this.plugin.settings.box;
     if (!s.authType)
-      s.authType = "developer";
+      s.authType = "one_click";
     const authGroup = container.createDiv({ cls: "sync-form-group" });
     authGroup.createDiv({ cls: "sync-form-label", text: "\u9A57\u8B49\u65B9\u5F0F" });
     const authSelect = authGroup.createEl("select", { cls: "sync-input" });
     const authOptions = [
+      { value: "one_click", label: "\u4E00\u9375\u9023\u7D50 (One-Click OAuth2 - \u63A8\u85A6\uFF0C\u514D\u8F38\u5165\u91D1\u9470)" },
       { value: "developer", label: "\u958B\u767C\u8005\u6B0A\u6756 (Developer Token - 60 \u5206\u9418\u904E\u671F)" },
       { value: "client_credentials", label: "\u7528\u6236\u7AEF\u6191\u8B49 (Client Credentials - \u9700 Enterprise \u4F01\u696D\u5E33\u865F)" },
-      { value: "oauth2", label: "\u7528\u6236\u9A57\u8B49 (OAuth 2.0 - \u652F\u63F4\u500B\u4EBA/\u514D\u8CBB\u5E33\u865F\uFF0C\u6C38\u4E45\u81EA\u52D5\u66F4\u65B0)" }
+      { value: "oauth2", label: "\u7528\u6236\u81EA\u8A02\u9A57\u8B49 (OAuth 2.0 - \u81EA\u884C\u8F38\u5165 Client ID \u8207 Secret)" }
     ];
     for (const opt of authOptions) {
       const el = authSelect.createEl("option", { value: opt.value, text: opt.label });
@@ -2259,7 +2284,42 @@ var SyncSaveSettingsTab = class extends import_obsidian4.PluginSettingTab {
       this.plugin.saveSettings();
       this.display();
     });
-    if (s.authType === "client_credentials") {
+    if (s.authType === "one_click") {
+      this.inputField(container, "\u6388\u6B0A\u4E2D\u7E7C\u4F3A\u670D\u5668\u7DB2\u5740 (Auth Helper URL - \u9078\u586B)", s.authHelperUrl || "", (v) => {
+        this.plugin.settings.box.authHelperUrl = v;
+        this.plugin.saveSettings();
+      }, "https://sync-save-auth.vercel.app");
+      const btnGroup = container.createDiv();
+      btnGroup.style.cssText = "margin: 12px 0; display: flex; flex-direction: column; gap: 8px;";
+      const connectBtn = btnGroup.createEl("button", {
+        cls: "sync-btn sync-btn-primary",
+        text: s.accessToken ? "\u91CD\u65B0\u9023\u7D50 Box \u5E33\u865F" : "\u9023\u7D50\u81F3 Box \u5E33\u865F"
+      });
+      connectBtn.addEventListener("click", () => {
+        const helperUrl = s.authHelperUrl || "https://sync-save-auth.vercel.app";
+        const authUrl = `${helperUrl}/api/box/authorize`;
+        window.open(authUrl, "_blank");
+      });
+      if (s.accessToken) {
+        const disconnectBtn = btnGroup.createEl("button", {
+          cls: "sync-btn sync-btn-secondary",
+          text: "\u4E2D\u65B7 Box \u9023\u7D50"
+        });
+        disconnectBtn.style.color = "var(--text-error)";
+        disconnectBtn.addEventListener("click", () => {
+          this.plugin.settings.box.accessToken = "";
+          this.plugin.settings.box.refreshToken = "";
+          this.plugin.saveSettings();
+          new import_obsidian4.Notice("\u5DF2\u4E2D\u65B7 Box \u9023\u7D50");
+          this.display();
+        });
+      }
+      const helpText = container.createDiv({
+        cls: "sync-connection-status",
+        text: "\u8AAA\u660E\uFF1A\u4E00\u9375\u9023\u7D50\u9700\u8981\u4E2D\u7E7C\u4F3A\u670D\u5668\u3002\u8ACB\u5148\u4F9D\u7167\u5C08\u6848\u4E0B\u7684 auth-helper \u8AAA\u660E\u90E8\u7F72\u81F3 Vercel\uFF0C\u4E26\u5C07\u4F60\u90E8\u7F72\u7684 URL \u586B\u5165\u300C\u6388\u6B0A\u4E2D\u7E7C\u4F3A\u670D\u5668\u7DB2\u5740\u300D\uFF08\u82E5\u4F7F\u7528\u9810\u8A2D\u4E2D\u7E7C\u7DB2\u5740\uFF0C\u8ACB\u78BA\u8A8D\u5176\u5DF2\u6B63\u78BA\u8A2D\u5B9A\u4E14\u975E 404\uFF09\u3002\u9EDE\u64CA\u300C\u9023\u7D50\u81F3 Box \u5E33\u865F\u300D\u5B8C\u6210\u5F8C\u6703\u81EA\u52D5\u56DE\u5F48\u7D81\u5B9A\u3002"
+      });
+      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
+    } else if (s.authType === "client_credentials") {
       this.inputField(container, "\u7528\u6236\u7AEF ID (Client ID)", s.clientId || "", (v) => {
         this.plugin.settings.box.clientId = v;
         this.plugin.saveSettings();
@@ -2517,8 +2577,8 @@ var DEFAULT_SETTINGS = {
   webdav: { url: "", username: "", password: "", path: "SyncSave" },
   dropbox: { accessToken: "", appFolder: true },
   onedrive: { accessToken: "", useAppFolder: true },
-  googledrive: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "" },
-  box: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "" },
+  googledrive: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", codeVerifier: "" },
+  box: { authType: "one_click", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", authHelperUrl: "" },
   encryptionPassword: "",
   syncOnSave: false,
   syncInterval: 0,
@@ -2564,6 +2624,30 @@ var SyncSavePlugin = class extends import_obsidian5.Plugin {
         }
       })
     );
+    this.registerObsidianProtocolHandler("sync-save-auth", (params) => {
+      const { provider, access_token, refresh_token } = params;
+      if (!provider) {
+        new import_obsidian5.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u7121\u6548\u7684\u6388\u6B0A\u5354\u8B70\u56DE\u8ABF");
+        return;
+      }
+      if (provider === "box") {
+        if (access_token && refresh_token) {
+          this.settings.box.accessToken = access_token;
+          this.settings.box.refreshToken = refresh_token;
+          this.settings.box.authType = "oauth2";
+          this.settings.box.clientId = "";
+          this.settings.box.clientSecret = "";
+          this.saveSettings();
+          new import_obsidian5.Notice("\u540C\u6B65\u5099\u4EFD\uFF1ABox \u96F2\u7AEF\u4E00\u9375\u6388\u6B0A\u6210\u529F\uFF01");
+          const setting = this.app.setting;
+          if (setting && setting.activeTab && setting.activeTab.id === this.manifest.id) {
+            setting.activeTab.display();
+          }
+        } else {
+          new import_obsidian5.Notice("\u540C\u6B65\u5099\u4EFD\uFF1ABox \u4E00\u9375\u6388\u6B0A\u5931\u6557\uFF0C\u672A\u53D6\u5F97\u91D1\u9470");
+        }
+      }
+    });
     if (this.settings.syncInterval > 0) {
       this.restartAutoSync();
     }
