@@ -20,12 +20,12 @@ export interface SyncLogEntry {
 interface SyncSaveSettings {
   activeProvider: string | null;
   enabledProviders: string[];
-  s3: { endpoint: string; region: string; accessKeyId: string; secretAccessKey: string; bucket: string; prefix: string };
-  webdav: { url: string; username: string; password: string; path: string };
-  dropbox: { accessToken: string; appFolder: boolean };
-  onedrive: { accessToken: string; useAppFolder: boolean };
-  googledrive: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string; codeVerifier?: string };
-  box: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string; authHelperUrl?: string };
+  s3: { endpoint: string; region: string; accessKeyId: string; secretAccessKey: string; bucket: string; prefix: string; accountName?: string };
+  webdav: { url: string; username: string; password: string; path: string; accountName?: string };
+  dropbox: { authType: string; accessToken: string; refreshToken: string; clientId: string; appFolder: boolean; codeVerifier?: string; accountName?: string };
+  onedrive: { authType: string; accessToken: string; refreshToken?: string; clientId?: string; useAppFolder: boolean; codeVerifier?: string; accountName?: string };
+  googledrive: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string; codeVerifier?: string; accountName?: string };
+  box: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string; authHelperUrl?: string; accountName?: string };
   encryptionPassword: string;
   syncOnSave: boolean;
   syncInterval: number;
@@ -41,12 +41,12 @@ interface SyncSaveSettings {
 const DEFAULT_SETTINGS: SyncSaveSettings = {
   activeProvider: "s3",
   enabledProviders: [],
-  s3: { endpoint: "", region: "us-east-1", accessKeyId: "", secretAccessKey: "", bucket: "", prefix: "" },
-  webdav: { url: "", username: "", password: "", path: "SyncSave" },
-  dropbox: { accessToken: "", appFolder: true },
-  onedrive: { accessToken: "", useAppFolder: true },
-  googledrive: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", codeVerifier: "" },
-  box: { authType: "one_click", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", authHelperUrl: "" },
+  s3: { endpoint: "", region: "us-east-1", accessKeyId: "", secretAccessKey: "", bucket: "", prefix: "", accountName: "" },
+  webdav: { url: "", username: "", password: "", path: "SyncSave", accountName: "" },
+  dropbox: { authType: "oauth2", accessToken: "", refreshToken: "", clientId: "", appFolder: true, codeVerifier: "", accountName: "" },
+  onedrive: { authType: "oauth2", accessToken: "", refreshToken: "", clientId: "", useAppFolder: true, codeVerifier: "", accountName: "" },
+  googledrive: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", codeVerifier: "", accountName: "" },
+  box: { authType: "one_click", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", authHelperUrl: "", accountName: "" },
   encryptionPassword: "",
   syncOnSave: false,
   syncInterval: 0,
@@ -100,12 +100,8 @@ export default class SyncSavePlugin extends Plugin {
       })
     );
 
-    this.registerObsidianProtocolHandler("sync-save-auth", (params) => {
-      const { provider, access_token, refresh_token } = params;
-      if (!provider) {
-        new Notice("同步備份：無效的授權協議回調");
-        return;
-      }
+    this.registerObsidianProtocolHandler("sync-save-auth", async (params) => {
+      const { provider, access_token, refresh_token, code, state } = params;
 
       if (provider === "box") {
         if (access_token && refresh_token) {
@@ -114,8 +110,18 @@ export default class SyncSavePlugin extends Plugin {
           this.settings.box.authType = "oauth2";
           this.settings.box.clientId = "";
           this.settings.box.clientSecret = "";
-          this.saveSettings();
+          await this.saveSettings();
           new Notice("同步備份：Box 雲端一鍵授權成功！");
+
+          // 獲取帳號 Email
+          const boxProv = this.getProvider("box");
+          if (boxProv) {
+            const res = await boxProv.testConnection();
+            if (res.success) {
+              this.settings.box.accountName = res.message.replace("Connected as ", "").replace("已連線為 ", "");
+              await this.saveSettings();
+            }
+          }
           
           // 重新整理目前顯示的設定頁面
           const setting = (this.app as any).setting;
@@ -126,7 +132,99 @@ export default class SyncSavePlugin extends Plugin {
           new Notice("同步備份：Box 一鍵授權失敗，未取得金鑰");
         }
       }
+
+      if (state === "dropbox" || provider === "dropbox") {
+        const finalCode = code || params.code;
+        if (finalCode) {
+          const providerInstance = this.getProvider("dropbox");
+          if (providerInstance && providerInstance.name === "Dropbox") {
+            const res = await (providerInstance as any).authorizeWithCode(finalCode, this.settings.dropbox.codeVerifier);
+            new Notice(res.message);
+            if (res.success) {
+              this.settings.dropbox.codeVerifier = "";
+              await this.saveSettings();
+
+              // 獲取帳號 Email
+              const res2 = await providerInstance.testConnection();
+              if (res2.success) {
+                this.settings.dropbox.accountName = res2.message.replace("Connected as ", "").replace("已連線為 ", "");
+                await this.saveSettings();
+              }
+              
+              const setting = (this.app as any).setting;
+              if (setting && setting.activeTab && setting.activeTab.id === this.manifest.id) {
+                setting.activeTab.display();
+              }
+            }
+          }
+        }
+      }
+
+      if (state === "onedrive" || provider === "onedrive") {
+        const finalCode = code || params.code;
+        if (finalCode) {
+          const providerInstance = this.getProvider("onedrive");
+          if (providerInstance && providerInstance.name === "OneDrive") {
+            const res = await (providerInstance as any).authorizeWithCode(finalCode, this.settings.onedrive.codeVerifier);
+            new Notice(res.message);
+            if (res.success) {
+              this.settings.onedrive.codeVerifier = "";
+              await this.saveSettings();
+
+              // 獲取帳號 Email
+              const res2 = await providerInstance.testConnection();
+              if (res2.success) {
+                this.settings.onedrive.accountName = res2.message.replace("Connected as ", "").replace("已連線為 ", "");
+                await this.saveSettings();
+              }
+              
+              const setting = (this.app as any).setting;
+              if (setting && setting.activeTab && setting.activeTab.id === this.manifest.id) {
+                setting.activeTab.display();
+              }
+            }
+          }
+        }
+      }
     });
+
+    const handleOneDriveAuthCallback = async (params: any) => {
+      console.log("[SyncSave] OneDrive callback received, params:", JSON.stringify(params));
+      const finalCode = params.code;
+      if (!finalCode) {
+        console.error("[SyncSave] No code in callback params");
+        new Notice("OneDrive 授權失敗：未收到授權碼");
+        return;
+      }
+      const providerInstance = this.getProvider("onedrive");
+      if (!providerInstance || providerInstance.name !== "OneDrive") {
+        console.error("[SyncSave] Could not get OneDrive provider");
+        return;
+      }
+      console.log("[SyncSave] codeVerifier:", this.settings.onedrive.codeVerifier?.substring(0, 10) + "...");
+      const res = await (providerInstance as any).authorizeWithCode(finalCode, this.settings.onedrive.codeVerifier);
+      console.log("[SyncSave] authorizeWithCode result:", res);
+      new Notice(res.message);
+      if (res.success) {
+        this.settings.onedrive.codeVerifier = "";
+        await this.saveSettings();
+
+        // 獲取帳號 Email
+        const res2 = await providerInstance.testConnection();
+        if (res2.success) {
+          this.settings.onedrive.accountName = res2.message.replace("Connected as ", "").replace("已連線為 ", "");
+          await this.saveSettings();
+        }
+        
+        const setting = (this.app as any).setting;
+        if (setting && setting.activeTab && setting.activeTab.id === this.manifest.id) {
+          setting.activeTab.display();
+        }
+      }
+    };
+
+    this.registerObsidianProtocolHandler("sync-save-cb-onedrive", handleOneDriveAuthCallback);
+    this.registerObsidianProtocolHandler("sync-save-cb-onedrivefull", handleOneDriveAuthCallback);
 
     if (this.settings.syncInterval > 0) {
       this.restartAutoSync();
@@ -149,9 +247,9 @@ export default class SyncSavePlugin extends Plugin {
       case "webdav":
         return new WebDAVProvider(s.webdav);
       case "dropbox":
-        return new DropboxProvider(s.dropbox);
+        return new DropboxProvider(s.dropbox, () => this.saveSettings());
       case "onedrive":
-        return new OneDriveProvider(s.onedrive);
+        return new OneDriveProvider(s.onedrive, () => this.saveSettings());
       case "googledrive":
         return new GoogleDriveProvider(s.googledrive, () => this.saveSettings());
       case "box":
@@ -229,6 +327,20 @@ export default class SyncSavePlugin extends Plugin {
     if (result.success) {
       this.syncStatusBar.setSuccess("已連線");
       new Notice(`同步備份：${result.message}`);
+
+      // 儲存帳號名稱
+      const active = this.settings.activeProvider;
+      if (active) {
+        const cleanMsg = result.message.replace("Connected as ", "").replace("已連線為 ", "").replace("Connected to ", "");
+        (this.settings as any)[active].accountName = cleanMsg;
+        await this.saveSettings();
+
+        // 重新整理 UI
+        const setting = (this.app as any).setting;
+        if (setting && setting.activeTab && setting.activeTab.id === this.manifest.id) {
+          setting.activeTab.display();
+        }
+      }
     } else {
       this.syncStatusBar.setError("連線失敗");
       new Notice(`同步備份：${result.message}`);

@@ -1,9 +1,40 @@
+import { requestUrl, RequestUrlResponse } from "obsidian";
 import { CloudProvider, SyncFile } from "../sync/CloudProvider";
 
+const DEFAULT_DROPBOX_CLIENT_ID = "FDT43J8Ze3lc6R2";
+
 interface DropboxConfig {
+  authType: string;
   accessToken: string;
   refreshToken?: string;
+  clientId?: string;
   appFolder: boolean;
+  codeVerifier?: string;
+}
+
+class RequestUrlResponseWrapper {
+  constructor(private res: RequestUrlResponse) {}
+  get ok() {
+    return this.res.status >= 200 && this.res.status < 300;
+  }
+  get status() {
+    return this.res.status;
+  }
+  get headers() {
+    const map = new Map<string, string>();
+    for (const [k, v] of Object.entries(this.res.headers)) {
+      map.set(k.toLowerCase(), v);
+    }
+    return {
+      get: (name: string) => map.get(name.toLowerCase()) || null
+    };
+  }
+  async json() {
+    return this.res.json;
+  }
+  async arrayBuffer() {
+    return this.res.arrayBuffer;
+  }
 }
 
 export class DropboxProvider extends CloudProvider {
@@ -13,13 +44,128 @@ export class DropboxProvider extends CloudProvider {
   private config: DropboxConfig;
   private connected = false;
 
-  constructor(config: DropboxConfig) {
+  private accessToken: string | null = null;
+  private tokenExpiresAt = 0;
+  private onTokenRefreshed?: () => void;
+
+  constructor(config: DropboxConfig, onTokenRefreshed?: () => void) {
     super();
     this.config = config;
+    this.onTokenRefreshed = onTokenRefreshed;
+  }
+
+  private async exchangeCodeForToken(code: string, codeVerifier?: string): Promise<{ success: boolean; message: string }> {
+    try {
+      const url = "https://api.dropbox.com/oauth2/token";
+      const params = new URLSearchParams();
+      params.append("grant_type", "authorization_code");
+      params.append("code", code);
+      params.append("client_id", this.config.clientId || DEFAULT_DROPBOX_CLIENT_ID);
+      
+      const verifier = codeVerifier || this.config.codeVerifier;
+      if (verifier) {
+        params.append("code_verifier", verifier);
+      }
+      params.append("redirect_uri", "obsidian://sync-save-auth");
+
+      const resp = await requestUrl({
+        url,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: params.toString(),
+        throw: false,
+      });
+
+      if (resp.status === 200) {
+        const data = resp.json;
+        this.accessToken = data.access_token;
+        this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+        this.config.refreshToken = data.refresh_token;
+        this.config.accessToken = data.access_token;
+        if (this.onTokenRefreshed) {
+          this.onTokenRefreshed();
+        }
+        return { success: true, message: "授權成功！已成功取得存取與刷新權杖。" };
+      }
+      
+      const errData = resp.json;
+      const errMsg = errData?.error_description || errData?.error || `HTTP 狀態碼 ${resp.status}`;
+      return { success: false, message: `授權失敗：${errMsg}` };
+    } catch (e) {
+      console.error("Dropbox OAuth token exchange failed", e);
+      return { success: false, message: `授權失敗：連線異常 (${(e as any).message || e})` };
+    }
+  }
+
+  private async refreshOAuth2Token(): Promise<boolean> {
+    if (!this.config.refreshToken) return false;
+
+    try {
+      const url = "https://api.dropbox.com/oauth2/token";
+      const params = new URLSearchParams();
+      params.append("grant_type", "refresh_token");
+      params.append("refresh_token", this.config.refreshToken);
+      params.append("client_id", this.config.clientId || DEFAULT_DROPBOX_CLIENT_ID);
+
+      const resp = await requestUrl({
+        url,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: params.toString(),
+        throw: false,
+      });
+
+      if (resp.status === 200) {
+        const data = resp.json;
+        this.accessToken = data.access_token;
+        this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+        if (data.refresh_token) {
+          this.config.refreshToken = data.refresh_token;
+        }
+        this.config.accessToken = data.access_token;
+        if (this.onTokenRefreshed) {
+          this.onTokenRefreshed();
+        }
+        return true;
+      }
+      return false;
+    } catch (e) {
+      console.error("Dropbox OAuth token refresh failed", e);
+      return false;
+    }
+  }
+
+  async authorizeWithCode(code: string, codeVerifier?: string): Promise<{ success: boolean; message: string }> {
+    return this.exchangeCodeForToken(code, codeVerifier);
+  }
+
+  private async checkAndRefreshToken(): Promise<void> {
+    if (this.config.authType === "oauth2" && this.config.refreshToken) {
+      if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
+        const success = await this.refreshOAuth2Token();
+        if (!success) {
+          throw new Error("無法更新 Dropbox 存取權權杖，請重新啟用驗證授權。");
+        }
+      }
+    } else {
+      this.accessToken = this.config.accessToken;
+    }
   }
 
   async connect(): Promise<boolean> {
-    if (!this.config.accessToken) return false;
+    try {
+      await this.checkAndRefreshToken();
+    } catch (e) {
+      console.error("Dropbox connect failed to refresh token", e);
+      throw new Error(`無法連線至 Dropbox：${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (!this.accessToken && !this.config.accessToken) {
+      throw new Error("無法連線至 Dropbox：存取權杖為空，請先設定權杖或進行 OAuth2 授權。");
+    }
     const result = await this.testConnection();
     this.connected = result.success;
     return this.connected;
@@ -27,6 +173,8 @@ export class DropboxProvider extends CloudProvider {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    this.accessToken = null;
+    this.tokenExpiresAt = 0;
   }
 
   isConnected(): boolean {
@@ -124,15 +272,18 @@ export class DropboxProvider extends CloudProvider {
   }
 
   getSettingsDisplay(): Record<string, string> {
+    const token = this.accessToken || this.config.accessToken;
     return {
       Type: this.config.appFolder ? "App Folder" : "Full Dropbox",
-      Token: `${this.config.accessToken.substring(0, 8)}...`,
+      Token: token ? `${token.substring(0, 8)}...` : "None",
     };
   }
 
   private async request(url: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<Response> {
+    await this.checkAndRefreshToken();
+
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.config.accessToken}`,
+      Authorization: `Bearer ${this.accessToken || this.config.accessToken}`,
       ...extraHeaders,
     };
 
@@ -140,10 +291,14 @@ export class DropboxProvider extends CloudProvider {
       headers["Content-Type"] = "application/json";
     }
 
-    return fetch(url, {
+    const response = await requestUrl({
+      url,
       method: "POST",
       headers,
       body: body instanceof ArrayBuffer ? body : body ? JSON.stringify(body) : undefined,
+      throw: false,
     });
+
+    return new RequestUrlResponseWrapper(response) as unknown as Response;
   }
 }
