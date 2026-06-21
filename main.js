@@ -2270,8 +2270,6 @@ var SyncSaveSettingsTab = class extends import_obsidian4.PluginSettingTab {
     const authSelect = authGroup.createEl("select", { cls: "sync-input" });
     const authOptions = [
       { value: "one_click", label: "\u4E00\u9375\u9023\u7D50 (One-Click OAuth2 - \u63A8\u85A6\uFF0C\u514D\u8F38\u5165\u91D1\u9470)" },
-      { value: "developer", label: "\u958B\u767C\u8005\u6B0A\u6756 (Developer Token - 60 \u5206\u9418\u904E\u671F)" },
-      { value: "client_credentials", label: "\u7528\u6236\u7AEF\u6191\u8B49 (Client Credentials - \u9700 Enterprise \u4F01\u696D\u5E33\u865F)" },
       { value: "oauth2", label: "\u7528\u6236\u81EA\u8A02\u9A57\u8B49 (OAuth 2.0 - \u81EA\u884C\u8F38\u5165 Client ID \u8207 Secret)" }
     ];
     for (const opt of authOptions) {
@@ -2319,21 +2317,7 @@ var SyncSaveSettingsTab = class extends import_obsidian4.PluginSettingTab {
         text: "\u8AAA\u660E\uFF1A\u4E00\u9375\u9023\u7D50\u9700\u8981\u4E2D\u7E7C\u4F3A\u670D\u5668\u3002\u8ACB\u5148\u4F9D\u7167\u5C08\u6848\u4E0B\u7684 auth-helper \u8AAA\u660E\u90E8\u7F72\u81F3 Vercel\uFF0C\u4E26\u5C07\u4F60\u90E8\u7F72\u7684 URL \u586B\u5165\u300C\u6388\u6B0A\u4E2D\u7E7C\u4F3A\u670D\u5668\u7DB2\u5740\u300D\uFF08\u82E5\u4F7F\u7528\u9810\u8A2D\u4E2D\u7E7C\u7DB2\u5740\uFF0C\u8ACB\u78BA\u8A8D\u5176\u5DF2\u6B63\u78BA\u8A2D\u5B9A\u4E14\u975E 404\uFF09\u3002\u9EDE\u64CA\u300C\u9023\u7D50\u81F3 Box \u5E33\u865F\u300D\u5B8C\u6210\u5F8C\u6703\u81EA\u52D5\u56DE\u5F48\u7D81\u5B9A\u3002"
       });
       helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    } else if (s.authType === "client_credentials") {
-      this.inputField(container, "\u7528\u6236\u7AEF ID (Client ID)", s.clientId || "", (v) => {
-        this.plugin.settings.box.clientId = v;
-        this.plugin.saveSettings();
-      }, "\u8F38\u5165 Custom App \u7684 Client ID");
-      this.inputField(container, "\u7528\u6236\u7AEF\u91D1\u9470 (Client Secret)", s.clientSecret || "", (v) => {
-        this.plugin.settings.box.clientSecret = v;
-        this.plugin.saveSettings();
-      }, "\u8F38\u5165 Custom App \u7684 Client Secret", "password");
-      const helpText = container.createDiv({
-        cls: "sync-connection-status",
-        text: "\u8ACB\u5728 Box Developer Console \u5EFA\u7ACB\u4E00\u500B Custom App\uFF0C\u5C07\u9A57\u8B49\u985E\u578B\u9078\u70BA\u300CClient Credentials\u300D\uFF0C\u4E26\u65BC\u8A2D\u5B9A\u4E2D\u7372\u53D6 Client ID \u8207 Client Secret\u3002\u63A5\u8457\u9EDE\u64CA\u4E0A\u65B9\u300C\u6E2C\u8A66\u9023\u7DDA\u300D\u9A57\u8B49\u6388\u6B0A\u3002"
-      });
-      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    } else if (s.authType === "oauth2") {
+    } else {
       this.inputField(container, "\u7528\u6236\u7AEF ID (Client ID)", s.clientId || "", (v) => {
         this.plugin.settings.box.clientId = v;
         this.plugin.saveSettings();
@@ -2402,21 +2386,6 @@ var SyncSaveSettingsTab = class extends import_obsidian4.PluginSettingTab {
         text: "\u8AAA\u660E\uFF1A\u8ACB\u5148\u8F38\u5165 Client ID \u8207 Client Secret\uFF0C\u9EDE\u64CA\u300C1. \u7522\u751F\u6388\u6B0A\u9023\u7D50\u300D\u4E26\u5728\u700F\u89BD\u5668\u767B\u5165\u6388\u6B0A\u3002\u5B8C\u6210\u5F8C\u7DB2\u9801\u6703\u986F\u793A\u300C\u7121\u6CD5\u9023\u4E0A\u9019\u500B\u7DB2\u7AD9\uFF08\u6B64\u70BA\u6B63\u5E38\u73FE\u8C61\uFF09\u300D\uFF0C\u8ACB\u76F4\u63A5\u8907\u88FD\u700F\u89BD\u5668\u7DB2\u5740\u5217 `code=` \u5F8C\u65B9\u7684\u4EE3\u78BC\uFF0C\u8CBC\u5230\u4E0B\u65B9\u8F38\u5165\u6846\u9EDE\u64CA\u300C3. \u555F\u7528\u9A57\u8B49\u300D\u5373\u53EF\u5B8C\u6210\u6C38\u4E45\u6388\u6B0A\u3002"
       });
       helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    } else {
-      this.inputField(container, "\u5B58\u53D6\u6B0A\u6756", s.accessToken, (v) => {
-        this.plugin.settings.box.accessToken = v;
-        this.plugin.saveSettings();
-      }, "\u8CBC\u4E0A Developer Token");
-      const helpText = container.createDiv({
-        cls: "sync-connection-status",
-        text: "\u5148\u78BA\u8A8D App \u5DF2\u555F\u7528\u300CRead and write all files\u300D\u7BC4\u570D\uFF0C\u518D\u5230 Authorization \u7522\u751F\u6B0A\u6756"
-      });
-      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-      const copyHelp = container.createDiv({
-        cls: "sync-connection-status",
-        text: "\u{1F4A1} \u8907\u88FD\u6280\u5DE7\uFF1A\u7522\u751F\u6B0A\u6756\u5F8C\u6309 F12 \u2192 Console \u2192 \u8CBC\u4E0A copy(document.querySelector('input[readonly]')?.value) \u2192 Enter"
-      });
-      copyHelp.style.cssText = "font-size: 12px; color: var(--text-muted); margin-top: 4px; padding: 4px;";
     }
   }
   renderSyncSettings() {

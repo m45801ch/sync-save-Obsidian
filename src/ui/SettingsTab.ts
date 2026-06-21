@@ -391,8 +391,6 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     const authSelect = authGroup.createEl("select", { cls: "sync-input" });
     const authOptions = [
       { value: "one_click", label: "一鍵連結 (One-Click OAuth2 - 推薦，免輸入金鑰)" },
-      { value: "developer", label: "開發者權杖 (Developer Token - 60 分鐘過期)" },
-      { value: "client_credentials", label: "用戶端憑證 (Client Credentials - 需 Enterprise 企業帳號)" },
       { value: "oauth2", label: "用戶自訂驗證 (OAuth 2.0 - 自行輸入 Client ID 與 Secret)" },
     ];
     for (const opt of authOptions) {
@@ -445,23 +443,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
       });
       helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
 
-    } else if (s.authType === "client_credentials") {
-      this.inputField(container, "用戶端 ID (Client ID)", s.clientId || "", (v) => {
-        this.plugin.settings.box.clientId = v;
-        this.plugin.saveSettings();
-      }, "輸入 Custom App 的 Client ID");
-
-      this.inputField(container, "用戶端金鑰 (Client Secret)", s.clientSecret || "", (v) => {
-        this.plugin.settings.box.clientSecret = v;
-        this.plugin.saveSettings();
-      }, "輸入 Custom App 的 Client Secret", "password");
-
-      const helpText = container.createDiv({
-        cls: "sync-connection-status",
-        text: "請在 Box Developer Console 建立一個 Custom App，將驗證類型選為「Client Credentials」，並於設定中獲取 Client ID 與 Client Secret。接著點擊上方「測試連線」驗證授權。",
-      });
-      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    } else if (s.authType === "oauth2") {
+    } else {
       this.inputField(container, "用戶端 ID (Client ID)", s.clientId || "", (v) => {
         this.plugin.settings.box.clientId = v;
         this.plugin.saveSettings();
@@ -537,23 +519,6 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
         text: "說明：請先輸入 Client ID 與 Client Secret，點擊「1. 產生授權連結」並在瀏覽器登入授權。完成後網頁會顯示「無法連上這個網站（此為正常現象）」，請直接複製瀏覽器網址列 `code=` 後方的代碼，貼到下方輸入框點擊「3. 啟用驗證」即可完成永久授權。",
       });
       helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-    } else {
-      this.inputField(container, "存取權杖", s.accessToken, (v) => {
-        this.plugin.settings.box.accessToken = v;
-        this.plugin.saveSettings();
-      }, "貼上 Developer Token");
-
-      const helpText = container.createDiv({
-        cls: "sync-connection-status",
-        text: "先確認 App 已啟用「Read and write all files」範圍，再到 Authorization 產生權杖",
-      });
-      helpText.style.cssText = "background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251, 191, 36, 0.2); color: var(--text-muted);";
-
-      const copyHelp = container.createDiv({
-        cls: "sync-connection-status",
-        text: "💡 複製技巧：產生權杖後按 F12 → Console → 貼上 copy(document.querySelector('input[readonly]')?.value) → Enter",
-      });
-      copyHelp.style.cssText = "font-size: 12px; color: var(--text-muted); margin-top: 4px; padding: 4px;";
     }
   }
 
