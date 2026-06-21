@@ -164,7 +164,7 @@ export class SyncService {
               progress: { current: processed, total },
             });
           } else {
-            const manifestFile = manifest?.files[localPath];
+            const manifestFile = manifest?.files?.[localPath];
             const lastMtime = manifestFile ? manifestFile.mtime : (manifest?.timestamp || 0);
 
             const localChanged = localFile.stat.mtime > lastMtime;

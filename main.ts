@@ -372,6 +372,7 @@ export default class SyncSavePlugin extends Plugin {
         break;
 
       case "sync-file":
+        this.syncStatusBar.setSyncing(event.progress);
         this.log(event.message);
         break;
 

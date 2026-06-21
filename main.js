@@ -59,6 +59,7 @@ var SyncService = class {
     return this.lastSyncTime;
   }
   async sync() {
+    var _a;
     if (this.isSyncing) {
       this.emit({ type: "sync-error", message: "Sync already in progress" });
       return;
@@ -142,7 +143,7 @@ var SyncService = class {
               progress: { current: processed, total }
             });
           } else {
-            const manifestFile = manifest == null ? void 0 : manifest.files[localPath];
+            const manifestFile = (_a = manifest == null ? void 0 : manifest.files) == null ? void 0 : _a[localPath];
             const lastMtime = manifestFile ? manifestFile.mtime : (manifest == null ? void 0 : manifest.timestamp) || 0;
             const localChanged = localFile.stat.mtime > lastMtime;
             const remoteChanged = remoteFile.mtime > lastMtime;
@@ -3232,6 +3233,7 @@ var SyncSavePlugin = class extends import_obsidian7.Plugin {
         this.syncStatusBar.setSyncing(event.progress);
         break;
       case "sync-file":
+        this.syncStatusBar.setSyncing(event.progress);
         this.log(event.message);
         break;
       case "sync-complete":
