@@ -53,10 +53,12 @@ export class GoogleDriveProvider extends CloudProvider {
   private readonly uploadBase = "https://www.googleapis.com/upload/drive/v3";
 
   private onTokenRefreshed?: () => void;
+  private remoteDir: string;
 
-  constructor(config: GoogleDriveConfig, onTokenRefreshed?: () => void) {
+  constructor(config: GoogleDriveConfig, remoteBaseDir: string, onTokenRefreshed?: () => void) {
     super();
     this.config = config;
+    this.remoteDir = remoteBaseDir || "SyncSaveObsidian";
     this.onTokenRefreshed = onTokenRefreshed;
   }
 
@@ -184,7 +186,7 @@ export class GoogleDriveProvider extends CloudProvider {
     }
     this.rootFolderId = await this.ensureRootFolder();
     if (!this.rootFolderId) {
-      throw new Error("無法連線至 Google Drive：無法建立或取得 'SyncSave' 根目錄。");
+      throw new Error("無法連線至 Google Drive：無法建立或取得 'SyncSaveObsidian' 根目錄。");
     }
     return this.connected;
   }
@@ -366,7 +368,8 @@ export class GoogleDriveProvider extends CloudProvider {
   }
 
   private async ensureRootFolder(): Promise<string | null> {
-    const q = encodeURIComponent("name='SyncSave' and mimeType='application/vnd.google-apps.folder' and trashed=false");
+    const rootName = this.remoteDir || "SyncSaveObsidian";
+    const q = encodeURIComponent(`name='${rootName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
     const resp = await this.request("GET", `${this.apiBase}/files?q=${q}&fields=files(id,name)`);
 
     if (!resp.ok) return null;
@@ -380,7 +383,7 @@ export class GoogleDriveProvider extends CloudProvider {
       "POST",
       `${this.apiBase}/files`,
       {
-        name: "SyncSave",
+        name: rootName,
         mimeType: "application/vnd.google-apps.folder",
       }
     );

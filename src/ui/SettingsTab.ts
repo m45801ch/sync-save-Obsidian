@@ -27,6 +27,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     this.renderProviderSelection();
     this.renderProviderSettings();
     this.renderSyncSettings();
+    this.renderRemoteBaseDirSettings();
     this.renderAdvancedSettings();
     this.renderSyncHistory();
   }
@@ -250,41 +251,153 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
   private renderWebDAVSettings(container: HTMLElement): void {
     const s = this.plugin.settings.webdav;
 
-    this.inputField(container, "伺服器網址", s.url, (v) => {
-      this.plugin.settings.webdav.url = v;
-      this.plugin.saveSettings();
-    }, "https://nextcloud.example.com/remote.php/dav/files/");
+    // 確保帳號列表存在
+    if (!s.accounts) s.accounts = [];
 
-    this.inputField(container, "同步路徑", s.path, (v) => {
-      this.plugin.settings.webdav.path = v;
-      this.plugin.saveSettings();
-    }, "SyncSave");
+    // --- 帳號選擇與管理區 ---
+    const accountSelectGroup = container.createDiv({ cls: "sync-form-group" });
+    accountSelectGroup.createDiv({ cls: "sync-form-label", text: "選擇使用帳號" });
+    
+    const selectRow = accountSelectGroup.createDiv();
+    selectRow.style.cssText = "display: flex; gap: 8px;";
+    
+    const accountSelect = selectRow.createEl("select", { cls: "sync-input" });
+    accountSelect.style.flex = "1";
+    
+    const refreshDropdown = () => {
+      accountSelect.empty();
+      if (s.accounts.length === 0) {
+        accountSelect.createEl("option", { value: "", text: "-- 尚未新增任何帳號 --" });
+      } else {
+        for (const account of s.accounts) {
+          const opt = accountSelect.createEl("option", { 
+            value: account.id, 
+            text: `${account.name} (${account.username}@${new URL(account.url).hostname || account.url})` 
+          });
+          if (account.id === s.activeAccountId) opt.selected = true;
+        }
+      }
+    };
+    
+    try {
+      refreshDropdown();
+    } catch {
+      // 避免 URL 解析失敗
+      accountSelect.empty();
+      for (const account of s.accounts) {
+        const opt = accountSelect.createEl("option", { value: account.id, text: `${account.name} (${account.username})` });
+        if (account.id === s.activeAccountId) opt.selected = true;
+      }
+    }
 
-    this.inputField(container, "使用者名稱", s.username, (v) => {
-      this.plugin.settings.webdav.username = v;
+    accountSelect.addEventListener("change", () => {
+      s.activeAccountId = accountSelect.value || null;
+      // 同步回舊有的欄位以維持相容性
+      const active = s.accounts.find(a => a.id === s.activeAccountId);
+      if (active) {
+        s.url = active.url;
+        s.username = active.username;
+        s.password = active.password;
+        s.path = active.path;
+      }
       this.plugin.saveSettings();
+      this.display();
     });
 
-    this.inputField(container, "密碼", s.password, (v) => {
-      this.plugin.settings.webdav.password = v;
+    const addAccountBtn = selectRow.createEl("button", { 
+      cls: "sync-btn sync-btn-primary", 
+      text: "新增帳號" 
+    });
+    addAccountBtn.addEventListener("click", () => {
+      const newId = "wd_" + Date.now();
+      const newAccount = {
+        id: newId,
+        name: `新 WebDAV 帳號`,
+        url: "https://",
+        username: "",
+        password: "",
+        path: "SyncSaveObsidian"
+      };
+      s.accounts.push(newAccount);
+      s.activeAccountId = newId;
+      // 同步回舊有的欄位以維持相容性
+      s.url = newAccount.url;
+      s.username = newAccount.username;
+      s.password = newAccount.password;
+      s.path = newAccount.path;
       this.plugin.saveSettings();
-    }, undefined, "password");
+      this.display();
+    });
 
-    if (s.username || s.password) {
-      const disconnectBtn = container.createEl("button", { 
-        cls: "sync-btn sync-btn-secondary", 
-        text: "中斷 WebDAV 連結" 
-      });
-      disconnectBtn.style.color = "var(--text-error)";
-      disconnectBtn.style.marginTop = "12px";
-      disconnectBtn.addEventListener("click", () => {
-        this.plugin.settings.webdav.username = "";
-        this.plugin.settings.webdav.password = "";
-        this.plugin.settings.webdav.accountName = "";
-        this.plugin.saveSettings();
-        new Notice("已清除 WebDAV 連線資訊");
-        this.display();
-      });
+    if (s.activeAccountId) {
+      const activeAccount = s.accounts.find(a => a.id === s.activeAccountId);
+      if (activeAccount) {
+        const divider = container.createDiv({ cls: "sync-settings-divider" });
+        divider.style.margin = "12px 0";
+
+        // 帳號別名設定
+        this.inputField(container, "帳號別名（方便識別）", activeAccount.name, (v) => {
+          activeAccount.name = v;
+          this.plugin.saveSettings();
+        });
+
+        // 伺服器網址
+        this.inputField(container, "伺服器網址", activeAccount.url, (v) => {
+          activeAccount.url = v;
+          s.url = v; // 同步至相容舊欄位
+          this.plugin.saveSettings();
+        }, "https://nextcloud.example.com/remote.php/dav/files/");
+
+        // 同步路徑
+        this.inputField(container, "同步路徑", activeAccount.path, (v) => {
+          activeAccount.path = v;
+          s.path = v; // 同步至相容舊欄位
+          this.plugin.saveSettings();
+        }, "SyncSaveObsidian");
+
+        // 使用者名稱
+        this.inputField(container, "使用者名稱", activeAccount.username, (v) => {
+          activeAccount.username = v;
+          s.username = v; // 同步至相容舊欄位
+          this.plugin.saveSettings();
+        });
+
+        // 密碼
+        this.inputField(container, "密碼", activeAccount.password, (v) => {
+          activeAccount.password = v;
+          s.password = v; // 同步至相容舊欄位
+          this.plugin.saveSettings();
+        }, undefined, "password");
+
+        // 管理按鈕組
+        const actionBtnGroup = container.createDiv();
+        actionBtnGroup.style.cssText = "margin-top: 16px; display: flex; gap: 8px;";
+
+        const deleteBtn = actionBtnGroup.createEl("button", { 
+          cls: "sync-btn sync-btn-secondary", 
+          text: "刪除此帳號" 
+        });
+        deleteBtn.style.color = "var(--text-error)";
+        deleteBtn.addEventListener("click", () => {
+          s.accounts = s.accounts.filter(a => a.id !== s.activeAccountId);
+          s.activeAccountId = s.accounts.length > 0 ? s.accounts[0].id : null;
+          if (s.activeAccountId) {
+            const active = s.accounts.find(a => a.id === s.activeAccountId)!;
+            s.url = active.url;
+            s.username = active.username;
+            s.password = active.password;
+            s.path = active.path;
+          } else {
+            s.url = "";
+            s.username = "";
+            s.password = "";
+            s.path = "SyncSaveObsidian";
+          }
+          this.plugin.saveSettings();
+          new Notice("已刪除 WebDAV 帳號");
+          this.display();
+        });
+      }
     }
   }
 
@@ -292,12 +405,21 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     const s = this.plugin.settings.dropbox;
     s.authType = "oauth2";
 
+    // 自訂 Client ID
+    this.inputField(container, "自訂 Client ID（可選，用於突破 Dropbox 用戶限制）", s.clientId, (v) => {
+      s.clientId = v;
+      this.plugin.saveSettings();
+    }, "留空則使用預設的金鑰（可能會提示用戶上限錯誤）");
+
+    const divider0 = container.createDiv({ cls: "sync-settings-divider" });
+    divider0.style.margin = "12px 0";
+
     // 產生授權連結按鈕
     const authLinkBtnGroup = container.createDiv();
     authLinkBtnGroup.style.cssText = "margin: 8px 0; display: flex; gap: 8px;";
     const genLinkBtn = authLinkBtnGroup.createEl("button", { cls: "sync-btn sync-btn-secondary", text: "1. 產生授權連結" });
     genLinkBtn.addEventListener("click", async () => {
-      const clientId = "FDT43J8Ze3lc6R2";
+      const clientId = s.clientId || "fwetpaegys8iwjf";
       const verifier = generateCodeVerifier();
       this.plugin.settings.dropbox.codeVerifier = verifier;
       await this.plugin.saveSettings();
@@ -388,7 +510,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     const toggleRow = toggleGroup.createDiv({ cls: "sync-toggle-row" });
     const toggleInfo = toggleRow.createDiv({ cls: "sync-toggle-info" });
     toggleInfo.createDiv({ cls: "sync-toggle-label", text: "使用應用程式資料夾" });
-    toggleInfo.createDiv({ cls: "sync-toggle-desc", text: "僅存取 Dropbox 中的 SyncSave 應用程式資料夾" });
+    toggleInfo.createDiv({ cls: "sync-toggle-desc", text: "僅存取 Dropbox 中的 SyncSaveObsidian 應用程式資料夾" });
 
     const toggle = toggleRow.createEl("input", { type: "checkbox", attr: { "data-toggle": "" } });
     toggle.checked = s.appFolder;
@@ -514,7 +636,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     const toggleRow = toggleGroup.createDiv({ cls: "sync-toggle-row" });
     const toggleInfo = toggleRow.createDiv({ cls: "sync-toggle-info" });
     toggleInfo.createDiv({ cls: "sync-toggle-label", text: "使用應用程式資料夾" });
-    toggleInfo.createDiv({ cls: "sync-toggle-desc", text: "僅同步到 OneDrive 中的 SyncSave 應用程式資料夾" });
+    toggleInfo.createDiv({ cls: "sync-toggle-desc", text: "僅同步到 OneDrive 中的 SyncSaveObsidian 應用程式資料夾" });
 
     const toggle = toggleRow.createEl("input", { type: "checkbox", attr: { "data-toggle": "" } });
     toggle.checked = s.useAppFolder;
@@ -635,7 +757,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     this.inputField(container, "授權中繼伺服器網址 (Auth Helper URL - 選填)", s.authHelperUrl || "", (v) => {
       this.plugin.settings.box.authHelperUrl = v;
       this.plugin.saveSettings();
-    }, "https://sync-save-auth.vercel.app");
+    }, "https://sync-save-obsidian.vercel.app");
 
     const btnGroup = container.createDiv();
     btnGroup.style.cssText = "margin: 12px 0; display: flex; flex-direction: column; gap: 8px;";
@@ -645,7 +767,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
       text: s.accessToken ? "重新連結 Box 帳號" : "連結至 Box 帳號" 
     });
     connectBtn.addEventListener("click", () => {
-      const helperUrl = s.authHelperUrl || "https://sync-save-auth.vercel.app";
+      const helperUrl = s.authHelperUrl || "https://sync-save-obsidian.vercel.app";
       const authUrl = `${helperUrl}/api/box/authorize`;
       window.open(authUrl, "_blank");
     });
@@ -778,6 +900,53 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     });
   }
 
+  private renderRemoteBaseDirSettings(): void {
+    const { containerEl } = this;
+
+    const section = containerEl.createDiv({ cls: "sync-section" });
+    const title = section.createDiv({ cls: "sync-section-title" });
+    title.setText("遠端目錄設定");
+
+    const card = section.createDiv({ cls: "sync-card" });
+    
+    const row = card.createDiv();
+    row.style.cssText = "display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0;";
+    
+    const info = row.createDiv();
+    info.style.cssText = "flex: 1; display: flex; flex-direction: column; gap: 4px;";
+    
+    const label = info.createDiv({ text: "修改遠端基資料夾 ( 實驗性質 )" });
+    label.style.cssText = "font-weight: var(--font-semibold); font-size: 14px; color: var(--text-normal);";
+    
+    const desc = info.createDiv({ text: "預設設定下，內容會被同步到遠端的「SyncSaveObsidian」資料夾下。您可以在此修改遠端資料夾名稱以套用至所有已啟用的雲端空間，或清空輸入框文字以恢復預設值。設定後請務必點選「確認」。" });
+    desc.style.cssText = "font-size: 12px; color: var(--text-muted); line-height: 1.4;";
+
+    const action = row.createDiv();
+    action.style.cssText = "display: flex; align-items: center; gap: 8px; flex-shrink: 0;";
+
+    const input = action.createEl("input", {
+      cls: "sync-input",
+      type: "text",
+      value: this.plugin.settings.remoteBaseDir || "",
+      attr: { placeholder: "SyncSaveObsidian" }
+    });
+    input.style.cssText = "width: 180px; margin: 0;";
+
+    const confirmBtn = action.createEl("button", {
+      cls: "sync-btn sync-btn-secondary",
+      text: "確認"
+    });
+    confirmBtn.style.cssText = "margin: 0;";
+
+    confirmBtn.addEventListener("click", async () => {
+      const value = input.value.trim();
+      this.plugin.settings.remoteBaseDir = value;
+      await this.plugin.saveSettings();
+      new Notice(`遠端基準資料夾已更新為：${value || "SyncSaveObsidian"}`);
+      this.display();
+    });
+  }
+
   private renderAdvancedSettings(): void {
     const { containerEl } = this;
 
@@ -838,13 +1007,47 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
   ): void {
     const group = container.createDiv({ cls: "sync-form-group" });
     group.createDiv({ cls: "sync-form-label", text: label });
-    const input = group.createEl("input", {
-      cls: "sync-input",
-      type,
-      value,
-      attr: { placeholder: placeholder || "" },
-    });
-    input.addEventListener("input", () => onChange(input.value));
+
+    if (type === "password") {
+      const wrapper = group.createDiv();
+      wrapper.style.cssText = "position: relative; display: flex; align-items: center; width: 100%;";
+      
+      const input = wrapper.createEl("input", {
+        cls: "sync-input",
+        type: "password",
+        value,
+        attr: { placeholder: placeholder || "" },
+      });
+      input.style.width = "100%";
+      input.style.paddingRight = "40px"; // 為右側圖示留空間
+
+      const toggleBtn = wrapper.createEl("span");
+      toggleBtn.setText("👁️‍🗨️"); // 閉眼圖示 (或是 👁️)
+      toggleBtn.style.cssText = "position: absolute; right: 12px; cursor: pointer; user-select: none; font-size: 16px; opacity: 0.6; transition: opacity 0.2s;";
+      
+      toggleBtn.addEventListener("mouseenter", () => toggleBtn.style.opacity = "1");
+      toggleBtn.addEventListener("mouseleave", () => toggleBtn.style.opacity = "0.6");
+      
+      toggleBtn.addEventListener("click", () => {
+        if (input.type === "password") {
+          input.type = "text";
+          toggleBtn.setText("👁️"); // 開眼圖示
+        } else {
+          input.type = "password";
+          toggleBtn.setText("👁️‍🗨️"); // 閉眼圖示
+        }
+      });
+
+      input.addEventListener("input", () => onChange(input.value));
+    } else {
+      const input = group.createEl("input", {
+        cls: "sync-input",
+        type,
+        value,
+        attr: { placeholder: placeholder || "" },
+      });
+      input.addEventListener("input", () => onChange(input.value));
+    }
   }
 
   private formRow(container: HTMLElement, renderFn: () => void): void {

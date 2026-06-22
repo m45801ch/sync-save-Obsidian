@@ -1,3 +1,4 @@
+import { requestUrl, RequestUrlResponse } from "obsidian";
 import { CloudProvider, SyncFile } from "../sync/CloudProvider";
 
 interface WebDAVConfig {
@@ -7,16 +8,47 @@ interface WebDAVConfig {
   path: string;
 }
 
+class RequestUrlResponseWrapper {
+  constructor(private res: RequestUrlResponse) {}
+  get ok() {
+    return this.res.status >= 200 && this.res.status < 300;
+  }
+  get status() {
+    return this.res.status;
+  }
+  get headers() {
+    const map = new Map<string, string>();
+    for (const [k, v] of Object.entries(this.res.headers)) {
+      map.set(k.toLowerCase(), v);
+    }
+    return {
+      get: (name: string) => map.get(name.toLowerCase()) || null
+    };
+  }
+  async text() {
+    if (typeof this.res.text === "string") {
+      return this.res.text;
+    }
+    // Fallback if text is not directly string (unlikely for requestUrl)
+    return new TextDecoder().decode(this.res.arrayBuffer);
+  }
+  async arrayBuffer() {
+    return this.res.arrayBuffer;
+  }
+}
+
 export class WebDAVProvider extends CloudProvider {
   readonly name = "WebDAV";
   readonly icon = "server";
 
   private config: WebDAVConfig;
   private connected = false;
+  private remoteDir: string;
 
-  constructor(config: WebDAVConfig) {
+  constructor(config: WebDAVConfig, remoteBaseDir: string) {
     super();
     this.config = config;
+    this.remoteDir = remoteBaseDir || config.path || "SyncSave";
   }
 
   async connect(): Promise<boolean> {
@@ -53,7 +85,7 @@ export class WebDAVProvider extends CloudProvider {
 
       if (href && !isCollection) {
         let filePath = decodeURIComponent(href[1]);
-        const basePath = this.config.path;
+        const basePath = this.remoteDir;
         if (filePath.startsWith(basePath)) {
           filePath = filePath.substring(basePath.length).replace(/^\//, "");
         }
@@ -88,7 +120,23 @@ export class WebDAVProvider extends CloudProvider {
     };
   }
 
+  private async ensureParentFolders(path: string): Promise<void> {
+    const parts = path.split("/").filter(Boolean);
+    parts.pop(); // 移除檔名本身，只留下資料夾結構
+    
+    let currentPath = "";
+    for (const part of parts) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const url = this.buildUrl(currentPath);
+      const checkResp = await this.request("PROPFIND", url);
+      if (checkResp.status === 404) {
+        await this.request("MKCOL", url);
+      }
+    }
+  }
+
   async uploadFile(path: string, content: ArrayBuffer, mtime: number): Promise<void> {
+    await this.ensureParentFolders(path);
     const url = this.buildUrl(path);
     const resp = await this.request("PUT", url, content);
 
@@ -110,6 +158,16 @@ export class WebDAVProvider extends CloudProvider {
       if (resp.ok || resp.status === 207) {
         return { success: true, message: `Connected to ${this.config.url}` };
       }
+      
+      // 如果路徑不存在 (404)，自動發送 MKCOL 建立資料夾
+      if (resp.status === 404) {
+        const createResp = await this.request("MKCOL", url);
+        if (createResp.ok || createResp.status === 201) {
+          return { success: true, message: `Connected to ${this.config.url} (已自動建立同步資料夾)` };
+        }
+        return { success: false, message: `同步資料夾不存在且自動建立失敗：MKCOL 狀態碼 ${createResp.status}` };
+      }
+
       return { success: false, message: `Status: ${resp.status}` };
     } catch (error) {
       return { success: false, message: `Connection failed: ${error}` };
@@ -126,7 +184,7 @@ export class WebDAVProvider extends CloudProvider {
 
   private buildUrl(path: string): string {
     const base = this.config.url.replace(/\/+$/, "");
-    const dir = this.config.path.replace(/^\/+|\/+$/g, "");
+    const dir = this.remoteDir.replace(/^\/+|\/+$/g, "");
     const cleanPath = path.replace(/^\/+/, "");
     return `${base}/${dir}/${cleanPath}`;
   }
@@ -145,6 +203,14 @@ export class WebDAVProvider extends CloudProvider {
       headers["Content-Type"] = "application/xml";
     }
 
-    return fetch(url, { method, headers, body: body || undefined });
+    const response = await requestUrl({
+      url,
+      method,
+      headers,
+      body: body || undefined,
+      throw: false
+    });
+
+    return new RequestUrlResponseWrapper(response) as unknown as Response;
   }
 }

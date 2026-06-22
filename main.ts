@@ -17,11 +17,28 @@ export interface SyncLogEntry {
   timestamp: number;
 }
 
+interface WebDAVAccount {
+  id: string;
+  name: string;
+  url: string;
+  username: string;
+  password: string;
+  path: string;
+}
+
 interface SyncSaveSettings {
   activeProvider: string | null;
   enabledProviders: string[];
   s3: { endpoint: string; region: string; accessKeyId: string; secretAccessKey: string; bucket: string; prefix: string; accountName?: string };
-  webdav: { url: string; username: string; password: string; path: string; accountName?: string };
+  webdav: { 
+    url: string; 
+    username: string; 
+    password: string; 
+    path: string; 
+    accountName?: string;
+    accounts: WebDAVAccount[];
+    activeAccountId: string | null;
+  };
   dropbox: { authType: string; accessToken: string; refreshToken: string; clientId: string; appFolder: boolean; codeVerifier?: string; accountName?: string };
   onedrive: { authType: string; accessToken: string; refreshToken?: string; clientId?: string; useAppFolder: boolean; codeVerifier?: string; accountName?: string };
   googledrive: { authType: string; accessToken: string; clientId: string; clientSecret: string; refreshToken: string; codeVerifier?: string; accountName?: string };
@@ -36,17 +53,26 @@ interface SyncSaveSettings {
   syncMode: string;
   showLastSyncInStatusBar: boolean;
   lastSuccessSyncTime: number;
+  remoteBaseDir: string;
 }
 
 const DEFAULT_SETTINGS: SyncSaveSettings = {
   activeProvider: "s3",
   enabledProviders: [],
   s3: { endpoint: "", region: "us-east-1", accessKeyId: "", secretAccessKey: "", bucket: "", prefix: "", accountName: "" },
-  webdav: { url: "", username: "", password: "", path: "SyncSave", accountName: "" },
+  webdav: { 
+    url: "", 
+    username: "", 
+    password: "", 
+    path: "SyncSaveObsidian", 
+    accountName: "",
+    accounts: [],
+    activeAccountId: null
+  },
   dropbox: { authType: "oauth2", accessToken: "", refreshToken: "", clientId: "", appFolder: true, codeVerifier: "", accountName: "" },
   onedrive: { authType: "oauth2", accessToken: "", refreshToken: "", clientId: "", useAppFolder: true, codeVerifier: "", accountName: "" },
   googledrive: { authType: "developer", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", codeVerifier: "", accountName: "" },
-  box: { authType: "one_click", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", authHelperUrl: "", accountName: "" },
+  box: { authType: "one_click", accessToken: "", clientId: "", clientSecret: "", refreshToken: "", authHelperUrl: "https://sync-save-obsidian.vercel.app", accountName: "" },
   encryptionPassword: "",
   syncOnSave: false,
   syncInterval: 0,
@@ -57,6 +83,7 @@ const DEFAULT_SETTINGS: SyncSaveSettings = {
   syncMode: "bidirectional",
   showLastSyncInStatusBar: true,
   lastSuccessSyncTime: 0,
+  remoteBaseDir: "",
 };
 
 export default class SyncSavePlugin extends Plugin {
@@ -241,19 +268,29 @@ export default class SyncSavePlugin extends Plugin {
   getProvider(providerId?: string): CloudProvider | null {
     const s = this.settings;
     const target = providerId || s.activeProvider;
+    const remoteBaseDir = s.remoteBaseDir;
     switch (target) {
       case "s3":
-        return new S3Provider(s.s3);
+        return new S3Provider(s.s3, remoteBaseDir);
       case "webdav":
-        return new WebDAVProvider(s.webdav);
+        {
+          const activeId = s.webdav.activeAccountId;
+          const activeAccount = s.webdav.accounts.find(a => a.id === activeId) || {
+            url: s.webdav.url,
+            username: s.webdav.username,
+            password: s.webdav.password,
+            path: s.webdav.path
+          };
+          return new WebDAVProvider(activeAccount, remoteBaseDir);
+        }
       case "dropbox":
-        return new DropboxProvider(s.dropbox, () => this.saveSettings());
+        return new DropboxProvider(s.dropbox, remoteBaseDir, () => this.saveSettings());
       case "onedrive":
-        return new OneDriveProvider(s.onedrive, () => this.saveSettings());
+        return new OneDriveProvider(s.onedrive, remoteBaseDir, () => this.saveSettings());
       case "googledrive":
-        return new GoogleDriveProvider(s.googledrive, () => this.saveSettings());
+        return new GoogleDriveProvider(s.googledrive, remoteBaseDir, () => this.saveSettings());
       case "box":
-        return new BoxProvider(s.box, () => this.saveSettings());
+        return new BoxProvider(s.box, remoteBaseDir, () => this.saveSettings());
       default:
         return null;
     }
@@ -299,7 +336,8 @@ export default class SyncSavePlugin extends Plugin {
         syncService.on((event: SyncEvent) => {
           const modifiedEvent = {
             ...event,
-            message: `[${providerId.toUpperCase()}] ${event.message}`
+            message: `[${providerId.toUpperCase()}] ${event.message}`,
+            providerId: providerId
           };
           this.handleSyncEvent(modifiedEvent);
         });
@@ -360,19 +398,20 @@ export default class SyncSavePlugin extends Plugin {
   }
 
   private handleSyncEvent(event: SyncEvent): void {
+    const providerName = event.providerId ? event.providerId.toUpperCase() : "";
     switch (event.type) {
       case "sync-start":
-        this.syncStatusBar.setSyncing();
+        this.syncStatusBar.setSyncing(undefined, providerName);
         this.ribbonIcon.addClass("syncing");
         this.log("同步開始");
         break;
 
       case "sync-progress":
-        this.syncStatusBar.setSyncing(event.progress);
+        this.syncStatusBar.setSyncing(event.progress, providerName);
         break;
 
       case "sync-file":
-        this.syncStatusBar.setSyncing(event.progress);
+        this.syncStatusBar.setSyncing(event.progress, providerName);
         this.log(event.message);
         break;
 
@@ -418,6 +457,30 @@ export default class SyncSavePlugin extends Plugin {
       googledrive: { ...DEFAULT_SETTINGS.googledrive, ...data.googledrive },
       box: { ...DEFAULT_SETTINGS.box, ...data.box },
     };
+
+    // 遷移舊的 WebDAV 設定到多帳號列表
+    if (this.settings.webdav.url && this.settings.webdav.accounts.length === 0) {
+      const legacyAccount = {
+        id: "default",
+        name: "預設帳號",
+        url: this.settings.webdav.url,
+        username: this.settings.webdav.username,
+        password: this.settings.webdav.password,
+        path: this.settings.webdav.path || "SyncSaveObsidian"
+      };
+      this.settings.webdav.accounts.push(legacyAccount);
+      this.settings.webdav.activeAccountId = "default";
+    }
+
+    // 將已儲存的舊預設路徑 "SyncSave" 遷移至新預設值 "SyncSaveObsidian"
+    if (this.settings.webdav.path === "SyncSave") {
+      this.settings.webdav.path = "SyncSaveObsidian";
+    }
+    for (const acct of this.settings.webdav.accounts) {
+      if (acct.path === "SyncSave") {
+        acct.path = "SyncSaveObsidian";
+      }
+    }
 
     // 遷移設定：如果沒有自訂 Box 金鑰，預設強制切換為「一鍵連結」
     if (!this.settings.box.clientId && !this.settings.box.clientSecret) {

@@ -1,7 +1,7 @@
 import { requestUrl, RequestUrlResponse } from "obsidian";
 import { CloudProvider, SyncFile } from "../sync/CloudProvider";
 
-const DEFAULT_DROPBOX_CLIENT_ID = "FDT43J8Ze3lc6R2";
+const DEFAULT_DROPBOX_CLIENT_ID = "fwetpaegys8iwjf";
 
 interface DropboxConfig {
   authType: string;
@@ -47,10 +47,12 @@ export class DropboxProvider extends CloudProvider {
   private accessToken: string | null = null;
   private tokenExpiresAt = 0;
   private onTokenRefreshed?: () => void;
+  private remoteBaseDir: string;
 
-  constructor(config: DropboxConfig, onTokenRefreshed?: () => void) {
+  constructor(config: DropboxConfig, remoteBaseDir: string, onTokenRefreshed?: () => void) {
     super();
     this.config = config;
+    this.remoteBaseDir = remoteBaseDir || "SyncSaveObsidian";
     this.onTokenRefreshed = onTokenRefreshed;
   }
 
@@ -182,21 +184,27 @@ export class DropboxProvider extends CloudProvider {
   }
 
   async listFiles(prefix: string): Promise<{ path: string; mtime: number; size: number }[]> {
-    const path = this.config.appFolder ? "" : `/${prefix}`;
-    const body = { path: path || "", recursive: true, include_media_info: false };
+    const basePath = this.remoteBaseDir ? "/" + this.remoteBaseDir.replace(/^\/+|\/+$/g, "") : "";
+    const body = { path: basePath, recursive: true, include_media_info: false };
 
     const resp = await this.request("https://api.dropboxapi.com/2/files/list_folder", body);
+    if (resp.status === 409 || resp.status === 404) {
+      return [];
+    }
     if (!resp.ok) throw new Error(`Dropbox list failed: ${resp.status}`);
 
     const data = await resp.json();
     const files: { path: string; mtime: number; size: number }[] = [];
 
+    const prefixPath = basePath ? basePath.toLowerCase() + "/" : "";
     for (const entry of data.entries || []) {
       if (entry[".tag"] !== "file") continue;
-      const filePath = entry.path_lower?.replace(/^\//, "") || "";
-      if (filePath.startsWith(prefix.replace(/^\//, ""))) {
+      const filePathLower = entry.path_lower || "";
+      if (!prefixPath || filePathLower.startsWith(prefixPath)) {
+        const displayPath = entry.path_display || entry.path_lower || "";
+        const relativePath = displayPath.substring(basePath.length).replace(/^\//, "");
         files.push({
-          path: filePath,
+          path: relativePath,
           mtime: new Date(entry.server_modified || entry.client_modified).getTime(),
           size: entry.size || 0,
         });
@@ -206,16 +214,32 @@ export class DropboxProvider extends CloudProvider {
     return files;
   }
 
+  private escapeHeaderValue(str: string): string {
+    return str.replace(/[^\x00-\x7F]/g, (char) => {
+      return '\\u' + ('0000' + char.charCodeAt(0).toString(16)).slice(-4);
+    });
+  }
+
   async downloadFile(path: string): Promise<SyncFile> {
-    const dropboxPath = this.config.appFolder ? `/${path}` : `/${path}`;
+    const basePath = this.remoteBaseDir ? "/" + this.remoteBaseDir.replace(/^\/+|\/+$/g, "") : "";
+    const dropboxPath = basePath ? `${basePath}/${path.replace(/^\/+/, "")}` : `/${path.replace(/^\/+/, "")}`;
 
     const resp = await this.request(
       "https://content.dropboxapi.com/2/files/download",
       undefined,
-      { "Dropbox-API-Arg": JSON.stringify({ path: dropboxPath }) }
+      { "Dropbox-API-Arg": this.escapeHeaderValue(JSON.stringify({ path: dropboxPath })) }
     );
 
-    if (!resp.ok) throw new Error(`Dropbox download failed: ${resp.status}`);
+    if (!resp.ok) {
+      let details = "";
+      try {
+        const text = (resp as any).res?.text || JSON.stringify(await resp.json());
+        details = ` - ${text}`;
+      } catch (e) {
+        details = ` - Status: ${resp.status}`;
+      }
+      throw new Error(`Dropbox download failed: ${resp.status}${details}`);
+    }
 
     const content = await resp.arrayBuffer();
     const apiResult = JSON.parse(resp.headers.get("dropbox-api-result") || "{}");
@@ -229,26 +253,37 @@ export class DropboxProvider extends CloudProvider {
   }
 
   async uploadFile(path: string, content: ArrayBuffer, mtime: number): Promise<void> {
-    const dropboxPath = this.config.appFolder ? `/${path}` : `/${path}`;
+    const basePath = this.remoteBaseDir ? "/" + this.remoteBaseDir.replace(/^\/+|\/+$/g, "") : "";
+    const dropboxPath = basePath ? `${basePath}/${path.replace(/^\/+/, "")}` : `/${path.replace(/^\/+/, "")}`;
 
     const resp = await this.request(
       "https://content.dropboxapi.com/2/files/upload",
       content,
       {
-        "Dropbox-API-Arg": JSON.stringify({
+        "Dropbox-API-Arg": this.escapeHeaderValue(JSON.stringify({
           path: dropboxPath,
           mode: "overwrite",
           mute: true,
-        }),
+        })),
         "Content-Type": "application/octet-stream",
       }
     );
 
-    if (!resp.ok) throw new Error(`Dropbox upload failed: ${resp.status}`);
+    if (!resp.ok) {
+      let details = "";
+      try {
+        const text = (resp as any).res?.text || JSON.stringify(await resp.json());
+        details = ` - ${text}`;
+      } catch (e) {
+        details = ` - Status: ${resp.status}`;
+      }
+      throw new Error(`Dropbox upload failed: ${resp.status}${details}`);
+    }
   }
 
   async deleteFile(path: string): Promise<void> {
-    const dropboxPath = this.config.appFolder ? `/${path}` : `/${path}`;
+    const basePath = this.remoteBaseDir ? "/" + this.remoteBaseDir.replace(/^\/+|\/+$/g, "") : "";
+    const dropboxPath = basePath ? `${basePath}/${path.replace(/^\/+/, "")}` : `/${path.replace(/^\/+/, "")}`;
     const resp = await this.request("https://api.dropboxapi.com/2/files/delete_v2", {
       path: dropboxPath,
     });

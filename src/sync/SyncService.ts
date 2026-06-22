@@ -15,6 +15,7 @@ export interface SyncEvent {
   message: string;
   progress?: { current: number; total: number };
   file?: string;
+  providerId?: string;
 }
 
 export interface SyncOptions {

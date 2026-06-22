@@ -30,12 +30,13 @@ export class SyncStatusBar {
     }
   }
 
-  setSyncing(progress?: { current: number; total: number }): void {
+  setSyncing(progress?: { current: number; total: number }, providerName?: string): void {
     this.dotEl.className = "sync-status-dot syncing";
+    const provStr = providerName ? `[${providerName}] ` : "";
     if (progress) {
-      this.textEl.setText(`同步中 ${progress.current}/${progress.total}`);
+      this.textEl.setText(`${provStr}同步中 ${progress.current}/${progress.total}`);
     } else {
-      this.textEl.setText("同步中…");
+      this.textEl.setText(`${provStr}同步中…`);
     }
   }
 

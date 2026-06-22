@@ -47,10 +47,12 @@ export class OneDriveProvider extends CloudProvider {
   private accessToken: string | null = null;
   private tokenExpiresAt = 0;
   private onTokenRefreshed?: () => void;
+  private remoteBaseDir: string;
 
-  constructor(config: OneDriveConfig, onTokenRefreshed?: () => void) {
+  constructor(config: OneDriveConfig, remoteBaseDir: string, onTokenRefreshed?: () => void) {
     super();
     this.config = config;
+    this.remoteBaseDir = remoteBaseDir || "SyncSaveObsidian";
     this.onTokenRefreshed = onTokenRefreshed;
   }
 
@@ -189,18 +191,29 @@ export class OneDriveProvider extends CloudProvider {
   }
 
   private get basePath(): string {
-    return this.config.useAppFolder
+    const root = this.config.useAppFolder
       ? "/drive/special/approot"
       : "/drive/root";
+    if (this.remoteBaseDir) {
+      const folder = this.remoteBaseDir.replace(/^\/+|\/+$/g, "");
+      return `${root}:/${folder}`;
+    }
+    return root;
   }
 
   async listFiles(prefix: string): Promise<{ path: string; mtime: number; size: number }[]> {
-    const url = `https://graph.microsoft.com/v1.0/me${this.basePath}:/${prefix}:/children`;
+    const cleanPrefix = prefix.replace(/^\/+/, "");
+    const url = cleanPrefix
+      ? `https://graph.microsoft.com/v1.0/me${this.basePath}/${cleanPrefix}:/children`
+      : `https://graph.microsoft.com/v1.0/me${this.basePath}:/children`;
     const files: { path: string; mtime: number; size: number }[] = [];
     let nextUrl: string | null = url;
 
     while (nextUrl) {
       const resp: Response = await this.request("GET", nextUrl);
+      if (resp.status === 404) {
+        return [];
+      }
       if (!resp.ok) throw new Error(`OneDrive list failed: ${resp.status}`);
 
       const data: any = await resp.json();

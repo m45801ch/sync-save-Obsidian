@@ -15,10 +15,20 @@ export class S3Provider extends CloudProvider {
 
   private config: S3Config;
   private connected = false;
+  private remoteBaseDir: string;
 
-  constructor(config: S3Config) {
+  constructor(config: S3Config, remoteBaseDir: string) {
     super();
     this.config = config;
+    this.remoteBaseDir = remoteBaseDir || "SyncSaveObsidian";
+  }
+
+  private getPrefix(): string {
+    const basePrefix = this.config.prefix ? this.config.prefix.replace(/\/+$/, "") + "/" : "";
+    if (this.remoteBaseDir) {
+      return basePrefix + this.remoteBaseDir.replace(/^\/+|\/+$/g, "") + "/";
+    }
+    return this.config.prefix || "";
   }
 
   async connect(): Promise<boolean> {
@@ -40,7 +50,7 @@ export class S3Provider extends CloudProvider {
   }
 
   async listFiles(prefix: string): Promise<{ path: string; mtime: number; size: number }[]> {
-    const fullPrefix = this.config.prefix + prefix;
+    const fullPrefix = this.getPrefix() + prefix;
     const url = this.buildUrl(`?list-type=2&prefix=${encodeURIComponent(fullPrefix)}`);
     const resp = await this.signedRequest("GET", url);
 
@@ -57,7 +67,7 @@ export class S3Provider extends CloudProvider {
       const size = content.match(/<Size>(.*?)<\/Size>/);
 
       if (key) {
-        const path = key[1].replace(this.config.prefix, "");
+        const path = key[1].replace(this.getPrefix(), "");
         files.push({
           path,
           mtime: lastModified ? new Date(lastModified[1]).getTime() : 0,
@@ -70,7 +80,7 @@ export class S3Provider extends CloudProvider {
   }
 
   async downloadFile(path: string): Promise<SyncFile> {
-    const url = this.buildUrl(encodeURI(this.config.prefix + path));
+    const url = this.buildUrl(encodeURI(this.getPrefix() + path));
     const resp = await this.signedRequest("GET", url);
 
     if (!resp.ok) throw new Error(`S3 download failed: ${resp.status}`);
@@ -88,7 +98,7 @@ export class S3Provider extends CloudProvider {
   }
 
   async uploadFile(path: string, content: ArrayBuffer, mtime: number): Promise<void> {
-    const url = this.buildUrl(encodeURI(this.config.prefix + path));
+    const url = this.buildUrl(encodeURI(this.getPrefix() + path));
     const resp = await this.signedRequest("PUT", url, content, {
       "Content-Type": "application/octet-stream",
     });
@@ -97,7 +107,7 @@ export class S3Provider extends CloudProvider {
   }
 
   async deleteFile(path: string): Promise<void> {
-    const url = this.buildUrl(encodeURI(this.config.prefix + path));
+    const url = this.buildUrl(encodeURI(this.getPrefix() + path));
     const resp = await this.signedRequest("DELETE", url);
     if (!resp.ok) throw new Error(`S3 delete failed: ${resp.status}`);
   }

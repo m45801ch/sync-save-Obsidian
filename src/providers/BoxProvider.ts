@@ -50,10 +50,12 @@ export class BoxProvider extends CloudProvider {
   private readonly uploadBase = "https://upload.box.com/api/2.0";
 
   private onTokenRefreshed?: () => void;
+  private remoteDir: string;
 
-  constructor(config: BoxConfig, onTokenRefreshed?: () => void) {
+  constructor(config: BoxConfig, remoteBaseDir: string, onTokenRefreshed?: () => void) {
     super();
     this.config = config;
+    this.remoteDir = remoteBaseDir || "SyncSaveObsidian";
     this.onTokenRefreshed = onTokenRefreshed;
   }
 
@@ -167,7 +169,7 @@ export class BoxProvider extends CloudProvider {
           return true;
         }
       } else {
-        const helperUrl = this.config.authHelperUrl || "https://sync-save-auth.vercel.app";
+        const helperUrl = this.config.authHelperUrl || "https://sync-save-obsidian.vercel.app";
         const url = `${helperUrl}/api/box/refresh`;
         const resp = await requestUrl({
           url: `${url}?refresh_token=${encodeURIComponent(this.config.refreshToken)}`,
@@ -209,11 +211,11 @@ export class BoxProvider extends CloudProvider {
           throw new Error("無法取得 Box 存取權杖，請檢查 Client ID 與 Client Secret。");
         }
       }
-    } else if (this.config.authType === "oauth2") {
+    } else if (this.config.authType === "oauth2" || this.config.authType === "one_click") {
       if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
         const success = await this.refreshOAuth2Token();
         if (!success) {
-          throw new Error("無法更新 Box 存取權權杖，請重新啟用驗證授權（輸入新的授權碼）。");
+          throw new Error("無法更新 Box 存取權權杖，請重新啟用驗證授權（一鍵登入）。");
         }
       }
     } else {
@@ -238,7 +240,7 @@ export class BoxProvider extends CloudProvider {
     }
     this.rootFolderId = await this.ensureRootFolder();
     if (!this.rootFolderId) {
-      throw new Error("無法連線至 Box：無法建立或取得 'SyncSave' 根目錄。");
+      throw new Error("無法連線至 Box：無法建立或取得 'SyncSaveObsidian' 根目錄。");
     }
     return this.connected;
   }
@@ -350,8 +352,8 @@ export class BoxProvider extends CloudProvider {
         if (this.config.authType === "client_credentials") {
           return { success: false, message: "憑證無效或未授權 — 請確認 Client ID 與 Client Secret，且該 App 已由 Box 管理員核准" };
         }
-        if (this.config.authType === "oauth2") {
-          return { success: false, message: "授權已失效或過期 — 請重新啟用驗證（輸入新的授權碼）" };
+        if (this.config.authType === "oauth2" || this.config.authType === "one_click") {
+          return { success: false, message: "授權已失效或過期 — 請重新啟用驗證（進行一鍵授權登入）" };
         }
         return { success: false, message: "權杖已過期或無效 — 請重新產生 Developer Token" };
       }
@@ -379,13 +381,14 @@ export class BoxProvider extends CloudProvider {
   }
 
   private async ensureRootFolder(): Promise<string | null> {
+    const rootName = this.remoteDir || "SyncSaveObsidian";
     const resp = await this.request("GET", `${this.apiBase}/folders/0/items?limit=200&fields=name,id`);
     if (!resp.ok) return null;
     const data = await resp.json();
     for (const entry of data.entries || []) {
-      if (entry.type === "folder" && entry.name === "SyncSave") return entry.id;
+      if (entry.type === "folder" && entry.name === rootName) return entry.id;
     }
-    const createResp = await this.request("POST", `${this.apiBase}/folders`, { name: "SyncSave", parent: { id: "0" } });
+    const createResp = await this.request("POST", `${this.apiBase}/folders`, { name: rootName, parent: { id: "0" } });
     if (!createResp.ok) {
       const errData = await createResp.json();
       if (errData?.context_info?.conflicts?.length > 0) return errData.context_info.conflicts[0].id;
