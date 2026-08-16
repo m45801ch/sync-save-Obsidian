@@ -2,6 +2,8 @@ import { CloudProvider, SyncFile, SyncManifest } from "./CloudProvider";
 import { Encryption } from "./Encryption";
 import { App, TFile, TFolder, Vault, Notice } from "obsidian";
 
+const TRASH_ROOT = ".sync-trash";
+
 export type SyncEventType =
   | "sync-start"
   | "sync-progress"
@@ -28,7 +30,8 @@ export interface SyncOptions {
   skipPaths: string[];
   conflictStrategy: "keep-newer" | "keep-larger" | "ask" | "smart";
   syncConfig: boolean;
-  syncMode?: "bidirectional" | "upload-only" | "download-only";
+  syncMode?: "bidirectional" | "upload-only" | "download-only" | "sync-delete";
+  trashRetentionDays?: number;
 }
 
 type SyncListener = (event: SyncEvent) => void;
@@ -140,9 +143,12 @@ export class SyncService {
           }
         }
       } else {
+        const deleteSynced = mode === "sync-delete";
         this.emit({
           type: "sync-progress",
-          message: `Found ${localFiles.length} local files, ${remoteFiles.length} remote files`,
+          message: deleteSynced
+            ? `備份並同步刪除：本機 ${localFiles.length} 個檔案，雲端 ${remoteFiles.length} 個檔案`
+            : `Found ${localFiles.length} local files, ${remoteFiles.length} remote files`,
           progress: { current: 0, total: localFiles.length + remoteFiles.length },
         });
 
@@ -238,19 +244,33 @@ export class SyncService {
           if (this.shouldSkip(remotePath.path)) continue;
           if (!localMap.has(remotePath.path)) {
             processed++;
-            await this.downloadFile(remotePath.path);
-            this.emit({
-              type: "sync-file",
-              message: `Downloaded (new): ${remotePath.path}`,
-              file: remotePath.path,
-              progress: { current: processed, total },
-            });
+            if (deleteSynced && manifest?.files?.[remotePath.path]) {
+              await this.moveToTrash(remotePath.path);
+              this.emit({
+                type: "sync-file",
+                message: `本機已刪除，已移至雲端垃圾桶：${remotePath.path}`,
+                file: remotePath.path,
+                progress: { current: processed, total },
+              });
+            } else {
+              await this.downloadFile(remotePath.path);
+              this.emit({
+                type: "sync-file",
+                message: `Downloaded (new): ${remotePath.path}`,
+                file: remotePath.path,
+                progress: { current: processed, total },
+              });
+            }
           }
         }
       }
 
       const updatedLocalFiles = await this.getLocalFiles();
       await this.saveManifest(updatedLocalFiles);
+
+      if (mode === "sync-delete") {
+        await this.cleanupTrash();
+      }
 
       this.lastSyncTime = Date.now();
       this.emit({ type: "sync-complete", message: "Sync completed successfully" });
@@ -294,6 +314,7 @@ export class SyncService {
       if (this.options.skipHidden && seg.startsWith(".")) return true;
       if (seg.startsWith("_") && !this.options.syncConfig) return true;
     }
+    if (this.isTrashPath(path)) return true;
     if (path.startsWith(".obsidian/") && !this.options.syncConfig) return true;
     for (const pattern of this.options.skipPaths) {
       if (path.match(pattern)) return true;
@@ -363,6 +384,64 @@ export class SyncService {
       }
     } else {
       await this.vault.createBinary(localPath, data);
+    }
+  }
+
+  private isTrashPath(path: string): boolean {
+    return path === TRASH_ROOT || path.startsWith(TRASH_ROOT + "/");
+  }
+
+  private getTrashDateFolder(): string {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  }
+
+  private async moveToTrash(path: string): Promise<void> {
+    const remote = await this.provider.downloadFile(path);
+    if (!remote) return;
+
+    let data = remote.content;
+    if (this.encryption.isEnabled()) {
+      const decrypted = await this.encryption.decrypt(data);
+      if (decrypted) data = decrypted;
+    }
+
+    const trashPath = `${TRASH_ROOT}/${this.getTrashDateFolder()}/${path}`;
+    await this.uploadFile(trashPath, { content: data, stat: { mtime: Date.now() } });
+    await this.provider.deleteFile(path);
+  }
+
+  async cleanupTrash(): Promise<void> {
+    const retentionDays = this.options.trashRetentionDays ?? 30;
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+
+    let trashFiles: { path: string; mtime: number; size: number }[];
+    try {
+      trashFiles = await this.provider.listFiles("");
+    } catch {
+      trashFiles = [];
+    }
+
+    const toDelete: string[] = [];
+    for (const f of trashFiles) {
+      if (!this.isTrashPath(f.path)) continue;
+      const segs = f.path.split("/");
+      if (segs.length < 2) continue;
+      const dateTs = new Date(`${segs[1]}T00:00:00`).getTime();
+      if (isNaN(dateTs)) continue;
+      if (dateTs < cutoff) toDelete.push(f.path);
+    }
+
+    for (const path of toDelete) {
+      try {
+        await this.provider.deleteFile(path);
+        this.emit({ type: "sync-file", message: `已清除垃圾桶檔案：${path}` });
+      } catch (e) {
+        this.emit({
+          type: "sync-error",
+          message: `清除垃圾桶失敗：${path} (${e instanceof Error ? e.message : String(e)})`,
+        });
+      }
     }
   }
 
