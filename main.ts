@@ -51,6 +51,8 @@ interface SyncSaveSettings {
   syncConfig: boolean;
   conflictStrategy: string;
   syncMode: string;
+  trashRetentionDays: number;
+  trashCleanupIntervalHours: number;
   showLastSyncInStatusBar: boolean;
   lastSuccessSyncTime: number;
   remoteBaseDir: string;
@@ -81,6 +83,8 @@ const DEFAULT_SETTINGS: SyncSaveSettings = {
   syncConfig: false,
   conflictStrategy: "keep-newer",
   syncMode: "bidirectional",
+  trashRetentionDays: 30,
+  trashCleanupIntervalHours: 24,
   showLastSyncInStatusBar: true,
   lastSuccessSyncTime: 0,
   remoteBaseDir: "",
@@ -117,6 +121,12 @@ export default class SyncSavePlugin extends Plugin {
         (this.app as any).setting.open();
         (this.app as any).setting.openTabById(this.manifest.id);
       },
+    });
+
+    this.addCommand({
+      id: "sync-clean-trash",
+      name: "清除雲端垃圾桶",
+      callback: () => this.cleanupTrashNow(),
     });
 
     this.registerEvent(
@@ -256,6 +266,9 @@ export default class SyncSavePlugin extends Plugin {
     if (this.settings.syncInterval > 0) {
       this.restartAutoSync();
     }
+    if (this.settings.trashCleanupIntervalHours > 0) {
+      this.restartTrashCleanupTimer();
+    }
 
     this.log("同步備份已載入");
   }
@@ -263,6 +276,10 @@ export default class SyncSavePlugin extends Plugin {
   onunload(): void {
     const provider = this.getProvider();
     provider?.disconnect();
+    if (this.trashCleanupTimer !== null) {
+      window.clearInterval(this.trashCleanupTimer);
+      this.trashCleanupTimer = null;
+    }
   }
 
   getProvider(providerId?: string): CloudProvider | null {
@@ -330,6 +347,7 @@ export default class SyncSavePlugin extends Plugin {
           conflictStrategy: this.settings.conflictStrategy as any,
           syncConfig: this.settings.syncConfig,
           syncMode: this.settings.syncMode as any,
+          trashRetentionDays: this.settings.trashRetentionDays,
         });
 
         // 綁定狀態監聽，在日誌中標註當前是哪個雲端
@@ -394,6 +412,74 @@ export default class SyncSavePlugin extends Plugin {
           this.manualSync();
         }, this.settings.syncInterval * 60 * 1000)
       );
+    }
+  }
+
+  private trashCleanupTimer: number | null = null;
+
+  async cleanupTrashNow(): Promise<void> {
+    if (this.isCurrentlySyncing) {
+      new Notice("同步正在進行中，請稍後再試");
+      return;
+    }
+
+    const enabled = this.settings.enabledProviders;
+    if (!enabled || enabled.length === 0) {
+      new Notice("同步備份：尚未啟用任何雲端服務");
+      return;
+    }
+
+    this.isCurrentlySyncing = true;
+    const encryption = new Encryption(this.settings.encryptionPassword);
+
+    try {
+      for (const providerId of enabled) {
+        const provider = this.getProvider(providerId);
+        if (!provider) continue;
+
+        const syncService = new SyncService(this.app.vault, {
+          provider,
+          encryption,
+          vaultName: this.app.vault.getName(),
+          syncOnSave: this.settings.syncOnSave,
+          syncInterval: this.settings.syncInterval,
+          skipHidden: this.settings.skipHidden,
+          skipPaths: this.settings.skipPaths,
+          conflictStrategy: this.settings.conflictStrategy as any,
+          syncConfig: this.settings.syncConfig,
+          syncMode: this.settings.syncMode as any,
+          trashRetentionDays: this.settings.trashRetentionDays,
+        });
+
+        syncService.on((event: SyncEvent) => {
+          const modifiedEvent = {
+            ...event,
+            message: `[${providerId.toUpperCase()}] ${event.message}`,
+            providerId,
+          };
+          this.handleSyncEvent(modifiedEvent);
+        });
+
+        this.log(`開始清除雲端垃圾桶：${providerId.toUpperCase()}`);
+        await syncService.cleanupTrash();
+      }
+      new Notice("同步備份：垃圾桶清除完成");
+    } catch (e) {
+      this.log(`清除垃圾桶發生非預期錯誤: ${e}`);
+    } finally {
+      this.isCurrentlySyncing = false;
+    }
+  }
+
+  restartTrashCleanupTimer(): void {
+    if (this.trashCleanupTimer !== null) {
+      window.clearInterval(this.trashCleanupTimer);
+      this.trashCleanupTimer = null;
+    }
+    if (this.settings.trashCleanupIntervalHours > 0) {
+      this.trashCleanupTimer = window.setInterval(() => {
+        this.cleanupTrashNow();
+      }, this.settings.trashCleanupIntervalHours * 60 * 60 * 1000);
     }
   }
 
