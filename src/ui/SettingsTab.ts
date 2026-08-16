@@ -28,6 +28,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     this.renderProviderSettings();
     this.renderSyncSettings();
     this.renderRemoteBaseDirSettings();
+    this.renderTrashSettings();
     this.renderAdvancedSettings();
     this.renderSyncHistory();
   }
@@ -853,6 +854,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
       { value: "bidirectional", label: "雙向同步 (Bidirectional Sync)" },
       { value: "upload-only", label: "單向備份 (Upload Only / Backup)" },
       { value: "download-only", label: "單向回復 (Download Only / Restore)" },
+      { value: "sync-delete", label: "備份並同步刪除 (Backup & Sync Delete)" },
     ];
     for (const m of modes) {
       const opt = modeSelect.createEl("option", { value: m.value, text: m.label });
@@ -867,6 +869,8 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
         modeDesc.setText("💡 單向備份：將本機的新增或修改單向同步上傳到雲端，不下載雲端的變更。適合做為雲端備份庫使用。");
       } else if (val === "download-only") {
         modeDesc.setText("💡 單向回復：將雲端檔案單向同步下載並覆蓋至本機，不發送本機的任何修改。適合在全新裝置上進行初始還原。");
+      } else if (val === "sync-delete") {
+        modeDesc.setText("💡 備份並同步刪除：上傳本機新增/修改、下載雲端變更，並將本機已刪除的檔案移到雲端垃圾桶（非真刪除）。適合維持本機與雲端鏡像一致。");
       } else {
         modeDesc.setText("💡 雙向同步：自動比對本機與雲端的最新異動，將兩端檔案同步至最新狀態。若發生衝突則套用下方的衝突處理策略。");
       }
@@ -947,13 +951,53 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     });
   }
 
+  private renderTrashSettings(): void {
+    const { containerEl } = this;
+
+    const section = containerEl.createDiv({ cls: "sync-section" });
+    const title = section.createDiv({ cls: "sync-section-title" });
+    title.setText("雲端垃圾桶設定");
+
+    const card = section.createDiv({ cls: "sync-card" });
+
+    const desc = card.createDiv({
+      cls: "sync-toggle-desc",
+      text: "在「備份並同步刪除」模式下，本機刪除的檔案會先搬移到雲端垃圾桶（.sync-trash/），超過保留天數後才會永久清除。",
+    });
+    desc.style.cssText = "font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-bottom: 12px;";
+
+    this.inputField(card, "垃圾桶保留天數", String(this.plugin.settings.trashRetentionDays), (v) => {
+      this.plugin.settings.trashRetentionDays = Math.max(0, parseInt(v) || 0);
+      this.plugin.saveSettings();
+    }, "預設 30 天", "number");
+
+    this.inputField(card, "垃圾桶清除間隔（小時）", String(this.plugin.settings.trashCleanupIntervalHours), (v) => {
+      this.plugin.settings.trashCleanupIntervalHours = Math.max(0, parseInt(v) || 0);
+      this.plugin.saveSettings();
+      this.plugin.restartTrashCleanupTimer();
+    }, "0 = 停用自動清除", "number");
+
+    const btnGroup = card.createDiv();
+    btnGroup.style.cssText = "display: flex; gap: 8px; margin-top: 12px;";
+
+    const cleanBtn = btnGroup.createEl("button", {
+      cls: "sync-btn sync-btn-secondary",
+      text: "立即清除垃圾桶",
+    });
+    cleanBtn.addEventListener("click", () => {
+      cleanBtn.setText("清除中...");
+      this.plugin.cleanupTrashNow().finally(() => {
+        cleanBtn.setText("立即清除垃圾桶");
+      });
+    });
+  }
+
   private renderAdvancedSettings(): void {
     const { containerEl } = this;
 
     const section = containerEl.createDiv({ cls: "sync-section" });
     const title = section.createDiv({ cls: "sync-section-title" });
     title.setText("加密設定");
-
     const card = section.createDiv({ cls: "sync-card" });
 
     const lockState = card.createDiv({
