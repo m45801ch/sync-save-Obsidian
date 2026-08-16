@@ -30,6 +30,7 @@ var import_obsidian8 = require("obsidian");
 
 // src/sync/SyncService.ts
 var import_obsidian = require("obsidian");
+var TRASH_ROOT = ".sync-trash";
 var SyncService = class {
   constructor(vault, options) {
     this.isSyncing = false;
@@ -59,7 +60,7 @@ var SyncService = class {
     return this.lastSyncTime;
   }
   async sync() {
-    var _a;
+    var _a, _b;
     if (this.isSyncing) {
       this.emit({ type: "sync-error", message: "Sync already in progress" });
       return;
@@ -122,9 +123,10 @@ var SyncService = class {
           }
         }
       } else {
+        const deleteSynced = mode === "sync-delete";
         this.emit({
           type: "sync-progress",
-          message: `Found ${localFiles.length} local files, ${remoteFiles.length} remote files`,
+          message: deleteSynced ? `\u5099\u4EFD\u4E26\u540C\u6B65\u522A\u9664\uFF1A\u672C\u6A5F ${localFiles.length} \u500B\u6A94\u6848\uFF0C\u96F2\u7AEF ${remoteFiles.length} \u500B\u6A94\u6848` : `Found ${localFiles.length} local files, ${remoteFiles.length} remote files`,
           progress: { current: 0, total: localFiles.length + remoteFiles.length }
         });
         const remoteMap = new Map(remoteFiles.map((f) => [f.path, f]));
@@ -211,18 +213,31 @@ var SyncService = class {
             continue;
           if (!localMap.has(remotePath.path)) {
             processed++;
-            await this.downloadFile(remotePath.path);
-            this.emit({
-              type: "sync-file",
-              message: `Downloaded (new): ${remotePath.path}`,
-              file: remotePath.path,
-              progress: { current: processed, total }
-            });
+            if (deleteSynced && ((_b = manifest == null ? void 0 : manifest.files) == null ? void 0 : _b[remotePath.path])) {
+              await this.moveToTrash(remotePath.path);
+              this.emit({
+                type: "sync-file",
+                message: `\u672C\u6A5F\u5DF2\u522A\u9664\uFF0C\u5DF2\u79FB\u81F3\u96F2\u7AEF\u5783\u573E\u6876\uFF1A${remotePath.path}`,
+                file: remotePath.path,
+                progress: { current: processed, total }
+              });
+            } else {
+              await this.downloadFile(remotePath.path);
+              this.emit({
+                type: "sync-file",
+                message: `Downloaded (new): ${remotePath.path}`,
+                file: remotePath.path,
+                progress: { current: processed, total }
+              });
+            }
           }
         }
       }
       const updatedLocalFiles = await this.getLocalFiles();
       await this.saveManifest(updatedLocalFiles);
+      if (mode === "sync-delete") {
+        await this.cleanupTrash();
+      }
       this.lastSyncTime = Date.now();
       this.emit({ type: "sync-complete", message: "Sync completed successfully" });
     } catch (error) {
@@ -264,6 +279,8 @@ var SyncService = class {
       if (seg.startsWith("_") && !this.options.syncConfig)
         return true;
     }
+    if (this.isTrashPath(path))
+      return true;
     if (path.startsWith(".obsidian/") && !this.options.syncConfig)
       return true;
     for (const pattern of this.options.skipPaths) {
@@ -330,6 +347,62 @@ var SyncService = class {
       }
     } else {
       await this.vault.createBinary(localPath, data);
+    }
+  }
+  isTrashPath(path) {
+    return path === TRASH_ROOT || path.startsWith(TRASH_ROOT + "/");
+  }
+  getTrashDateFolder() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  }
+  async moveToTrash(path) {
+    const remote = await this.provider.downloadFile(path);
+    if (!remote)
+      return;
+    let data = remote.content;
+    if (this.encryption.isEnabled()) {
+      const decrypted = await this.encryption.decrypt(data);
+      if (decrypted)
+        data = decrypted;
+    }
+    const trashPath = `${TRASH_ROOT}/${this.getTrashDateFolder()}/${path}`;
+    await this.uploadFile(trashPath, { content: data, stat: { mtime: Date.now() } });
+    await this.provider.deleteFile(path);
+  }
+  async cleanupTrash() {
+    var _a;
+    const retentionDays = (_a = this.options.trashRetentionDays) != null ? _a : 30;
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1e3;
+    let trashFiles;
+    try {
+      trashFiles = await this.provider.listFiles("");
+    } catch (e) {
+      trashFiles = [];
+    }
+    const toDelete = [];
+    for (const f of trashFiles) {
+      if (!this.isTrashPath(f.path))
+        continue;
+      const segs = f.path.split("/");
+      if (segs.length < 2)
+        continue;
+      const dateTs = new Date(`${segs[1]}T00:00:00`).getTime();
+      if (isNaN(dateTs))
+        continue;
+      if (dateTs < cutoff)
+        toDelete.push(f.path);
+    }
+    for (const path of toDelete) {
+      try {
+        await this.provider.deleteFile(path);
+        this.emit({ type: "sync-file", message: `\u5DF2\u6E05\u9664\u5783\u573E\u6876\u6A94\u6848\uFF1A${path}` });
+      } catch (e) {
+        this.emit({
+          type: "sync-error",
+          message: `\u6E05\u9664\u5783\u573E\u6876\u5931\u6557\uFF1A${path} (${e instanceof Error ? e.message : String(e)})`
+        });
+      }
     }
   }
   async saveManifest(localFiles) {
@@ -2364,6 +2437,7 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
     this.renderProviderSettings();
     this.renderSyncSettings();
     this.renderRemoteBaseDirSettings();
+    this.renderTrashSettings();
     this.renderAdvancedSettings();
     this.renderSyncHistory();
   }
@@ -3056,7 +3130,8 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
     const modes = [
       { value: "bidirectional", label: "\u96D9\u5411\u540C\u6B65 (Bidirectional Sync)" },
       { value: "upload-only", label: "\u55AE\u5411\u5099\u4EFD (Upload Only / Backup)" },
-      { value: "download-only", label: "\u55AE\u5411\u56DE\u5FA9 (Download Only / Restore)" }
+      { value: "download-only", label: "\u55AE\u5411\u56DE\u5FA9 (Download Only / Restore)" },
+      { value: "sync-delete", label: "\u5099\u4EFD\u4E26\u540C\u6B65\u522A\u9664 (Backup & Sync Delete)" }
     ];
     for (const m of modes) {
       const opt = modeSelect.createEl("option", { value: m.value, text: m.label });
@@ -3070,6 +3145,8 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
         modeDesc.setText("\u{1F4A1} \u55AE\u5411\u5099\u4EFD\uFF1A\u5C07\u672C\u6A5F\u7684\u65B0\u589E\u6216\u4FEE\u6539\u55AE\u5411\u540C\u6B65\u4E0A\u50B3\u5230\u96F2\u7AEF\uFF0C\u4E0D\u4E0B\u8F09\u96F2\u7AEF\u7684\u8B8A\u66F4\u3002\u9069\u5408\u505A\u70BA\u96F2\u7AEF\u5099\u4EFD\u5EAB\u4F7F\u7528\u3002");
       } else if (val === "download-only") {
         modeDesc.setText("\u{1F4A1} \u55AE\u5411\u56DE\u5FA9\uFF1A\u5C07\u96F2\u7AEF\u6A94\u6848\u55AE\u5411\u540C\u6B65\u4E0B\u8F09\u4E26\u8986\u84CB\u81F3\u672C\u6A5F\uFF0C\u4E0D\u767C\u9001\u672C\u6A5F\u7684\u4EFB\u4F55\u4FEE\u6539\u3002\u9069\u5408\u5728\u5168\u65B0\u88DD\u7F6E\u4E0A\u9032\u884C\u521D\u59CB\u9084\u539F\u3002");
+      } else if (val === "sync-delete") {
+        modeDesc.setText("\u{1F4A1} \u5099\u4EFD\u4E26\u540C\u6B65\u522A\u9664\uFF1A\u4E0A\u50B3\u672C\u6A5F\u65B0\u589E/\u4FEE\u6539\u3001\u4E0B\u8F09\u96F2\u7AEF\u8B8A\u66F4\uFF0C\u4E26\u5C07\u672C\u6A5F\u5DF2\u522A\u9664\u7684\u6A94\u6848\u79FB\u5230\u96F2\u7AEF\u5783\u573E\u6876\uFF08\u975E\u771F\u522A\u9664\uFF09\u3002\u9069\u5408\u7DAD\u6301\u672C\u6A5F\u8207\u96F2\u7AEF\u93E1\u50CF\u4E00\u81F4\u3002");
       } else {
         modeDesc.setText("\u{1F4A1} \u96D9\u5411\u540C\u6B65\uFF1A\u81EA\u52D5\u6BD4\u5C0D\u672C\u6A5F\u8207\u96F2\u7AEF\u7684\u6700\u65B0\u7570\u52D5\uFF0C\u5C07\u5169\u7AEF\u6A94\u6848\u540C\u6B65\u81F3\u6700\u65B0\u72C0\u614B\u3002\u82E5\u767C\u751F\u885D\u7A81\u5247\u5957\u7528\u4E0B\u65B9\u7684\u885D\u7A81\u8655\u7406\u7B56\u7565\u3002");
       }
@@ -3133,6 +3210,39 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
       await this.plugin.saveSettings();
       new import_obsidian7.Notice(`\u9060\u7AEF\u57FA\u6E96\u8CC7\u6599\u593E\u5DF2\u66F4\u65B0\u70BA\uFF1A${value || "SyncSaveObsidian"}`);
       this.display();
+    });
+  }
+  renderTrashSettings() {
+    const { containerEl } = this;
+    const section = containerEl.createDiv({ cls: "sync-section" });
+    const title = section.createDiv({ cls: "sync-section-title" });
+    title.setText("\u96F2\u7AEF\u5783\u573E\u6876\u8A2D\u5B9A");
+    const card = section.createDiv({ cls: "sync-card" });
+    const desc = card.createDiv({
+      cls: "sync-toggle-desc",
+      text: "\u5728\u300C\u5099\u4EFD\u4E26\u540C\u6B65\u522A\u9664\u300D\u6A21\u5F0F\u4E0B\uFF0C\u672C\u6A5F\u522A\u9664\u7684\u6A94\u6848\u6703\u5148\u642C\u79FB\u5230\u96F2\u7AEF\u5783\u573E\u6876\uFF08.sync-trash/\uFF09\uFF0C\u8D85\u904E\u4FDD\u7559\u5929\u6578\u5F8C\u624D\u6703\u6C38\u4E45\u6E05\u9664\u3002"
+    });
+    desc.style.cssText = "font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-bottom: 12px;";
+    this.inputField(card, "\u5783\u573E\u6876\u4FDD\u7559\u5929\u6578", String(this.plugin.settings.trashRetentionDays), (v) => {
+      this.plugin.settings.trashRetentionDays = Math.max(0, parseInt(v) || 0);
+      this.plugin.saveSettings();
+    }, "\u9810\u8A2D 30 \u5929", "number");
+    this.inputField(card, "\u5783\u573E\u6876\u6E05\u9664\u9593\u9694\uFF08\u5C0F\u6642\uFF09", String(this.plugin.settings.trashCleanupIntervalHours), (v) => {
+      this.plugin.settings.trashCleanupIntervalHours = Math.max(0, parseInt(v) || 0);
+      this.plugin.saveSettings();
+      this.plugin.restartTrashCleanupTimer();
+    }, "0 = \u505C\u7528\u81EA\u52D5\u6E05\u9664", "number");
+    const btnGroup = card.createDiv();
+    btnGroup.style.cssText = "display: flex; gap: 8px; margin-top: 12px;";
+    const cleanBtn = btnGroup.createEl("button", {
+      cls: "sync-btn sync-btn-secondary",
+      text: "\u7ACB\u5373\u6E05\u9664\u5783\u573E\u6876"
+    });
+    cleanBtn.addEventListener("click", () => {
+      cleanBtn.setText("\u6E05\u9664\u4E2D...");
+      this.plugin.cleanupTrashNow().finally(() => {
+        cleanBtn.setText("\u7ACB\u5373\u6E05\u9664\u5783\u573E\u6876");
+      });
     });
   }
   renderAdvancedSettings() {
@@ -3253,6 +3363,8 @@ var DEFAULT_SETTINGS = {
   syncConfig: false,
   conflictStrategy: "keep-newer",
   syncMode: "bidirectional",
+  trashRetentionDays: 30,
+  trashCleanupIntervalHours: 24,
   showLastSyncInStatusBar: true,
   lastSuccessSyncTime: 0,
   remoteBaseDir: ""
@@ -3262,6 +3374,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
     super(...arguments);
     this.syncLog = [];
     this.isCurrentlySyncing = false;
+    this.trashCleanupTimer = null;
   }
   async onload() {
     await this.loadSettings();
@@ -3283,6 +3396,11 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
         this.app.setting.open();
         this.app.setting.openTabById(this.manifest.id);
       }
+    });
+    this.addCommand({
+      id: "sync-clean-trash",
+      name: "\u6E05\u9664\u96F2\u7AEF\u5783\u573E\u6876",
+      callback: () => this.cleanupTrashNow()
     });
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
@@ -3402,11 +3520,18 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
     if (this.settings.syncInterval > 0) {
       this.restartAutoSync();
     }
+    if (this.settings.trashCleanupIntervalHours > 0) {
+      this.restartTrashCleanupTimer();
+    }
     this.log("\u540C\u6B65\u5099\u4EFD\u5DF2\u8F09\u5165");
   }
   onunload() {
     const provider = this.getProvider();
     provider == null ? void 0 : provider.disconnect();
+    if (this.trashCleanupTimer !== null) {
+      window.clearInterval(this.trashCleanupTimer);
+      this.trashCleanupTimer = null;
+    }
   }
   getProvider(providerId) {
     const s = this.settings;
@@ -3464,7 +3589,8 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
           skipPaths: this.settings.skipPaths,
           conflictStrategy: this.settings.conflictStrategy,
           syncConfig: this.settings.syncConfig,
-          syncMode: this.settings.syncMode
+          syncMode: this.settings.syncMode,
+          trashRetentionDays: this.settings.trashRetentionDays
         });
         syncService.on((event) => {
           const modifiedEvent = {
@@ -3517,6 +3643,65 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
           this.manualSync();
         }, this.settings.syncInterval * 60 * 1e3)
       );
+    }
+  }
+  async cleanupTrashNow() {
+    if (this.isCurrentlySyncing) {
+      new import_obsidian8.Notice("\u540C\u6B65\u6B63\u5728\u9032\u884C\u4E2D\uFF0C\u8ACB\u7A0D\u5F8C\u518D\u8A66");
+      return;
+    }
+    const enabled = this.settings.enabledProviders;
+    if (!enabled || enabled.length === 0) {
+      new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5C1A\u672A\u555F\u7528\u4EFB\u4F55\u96F2\u7AEF\u670D\u52D9");
+      return;
+    }
+    this.isCurrentlySyncing = true;
+    const encryption = new Encryption(this.settings.encryptionPassword);
+    try {
+      for (const providerId of enabled) {
+        const provider = this.getProvider(providerId);
+        if (!provider)
+          continue;
+        const syncService = new SyncService(this.app.vault, {
+          provider,
+          encryption,
+          vaultName: this.app.vault.getName(),
+          syncOnSave: this.settings.syncOnSave,
+          syncInterval: this.settings.syncInterval,
+          skipHidden: this.settings.skipHidden,
+          skipPaths: this.settings.skipPaths,
+          conflictStrategy: this.settings.conflictStrategy,
+          syncConfig: this.settings.syncConfig,
+          syncMode: this.settings.syncMode,
+          trashRetentionDays: this.settings.trashRetentionDays
+        });
+        syncService.on((event) => {
+          const modifiedEvent = {
+            ...event,
+            message: `[${providerId.toUpperCase()}] ${event.message}`,
+            providerId
+          };
+          this.handleSyncEvent(modifiedEvent);
+        });
+        this.log(`\u958B\u59CB\u6E05\u9664\u96F2\u7AEF\u5783\u573E\u6876\uFF1A${providerId.toUpperCase()}`);
+        await syncService.cleanupTrash();
+      }
+      new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5783\u573E\u6876\u6E05\u9664\u5B8C\u6210");
+    } catch (e) {
+      this.log(`\u6E05\u9664\u5783\u573E\u6876\u767C\u751F\u975E\u9810\u671F\u932F\u8AA4: ${e}`);
+    } finally {
+      this.isCurrentlySyncing = false;
+    }
+  }
+  restartTrashCleanupTimer() {
+    if (this.trashCleanupTimer !== null) {
+      window.clearInterval(this.trashCleanupTimer);
+      this.trashCleanupTimer = null;
+    }
+    if (this.settings.trashCleanupIntervalHours > 0) {
+      this.trashCleanupTimer = window.setInterval(() => {
+        this.cleanupTrashNow();
+      }, this.settings.trashCleanupIntervalHours * 60 * 60 * 1e3);
     }
   }
   handleSyncEvent(event) {
