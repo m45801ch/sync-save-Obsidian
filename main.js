@@ -115,6 +115,8 @@ function buildSyncPlan(input) {
   const remoteByPath = new Map(input.remote.map((entry) => [entry.path, entry]));
   const paths = /* @__PURE__ */ new Set([...localByPath.keys(), ...remoteByPath.keys()]);
   const conflictStrategy = (_a = input.conflictStrategy) != null ? _a : "keep-newer";
+  const uploadAuthoritative = input.mode === "upload-only" || input.mode === "upload-delete";
+  const downloadAuthoritative = input.mode === "download-only" || input.mode === "download-delete";
   const actions = [];
   const add = (type, path, reason, targetPath, source) => actions.push({ type, path, reason, targetPath, source });
   const resolveConflict = (path, local, remote) => {
@@ -141,28 +143,29 @@ function buildSyncPlan(input) {
   for (const path of paths) {
     const local = localByPath.get(path);
     const remote = remoteByPath.get(path);
-    const previous = input.manifestFiles[path];
+    const hasPrevious = Object.prototype.hasOwnProperty.call(input.manifestFiles, path);
+    const previous = hasPrevious ? input.manifestFiles[path] : void 0;
     if (local && !remote) {
       if (input.mode === "download-delete" && previous)
         add("delete-local", path, "remote deleted after last sync");
-      else if (input.mode !== "download-only")
+      else if (!downloadAuthoritative)
         add("upload", path, "local-only file");
       continue;
     }
     if (!local && remote) {
       if (input.mode === "upload-delete" && previous)
         add("move-remote-to-trash", path, "local deleted after last sync");
-      else if (input.mode !== "upload-only")
+      else if (!uploadAuthoritative)
         add("download", path, "remote-only file");
       continue;
     }
     if (!local || !remote || local.hash === remote.hash)
       continue;
-    if (input.mode === "upload-only") {
+    if (uploadAuthoritative) {
       add("upload", path, "upload-only mode keeps local source");
       continue;
     }
-    if (input.mode === "download-only") {
+    if (downloadAuthoritative) {
       add("download", path, "download-only mode keeps remote source");
       continue;
     }
@@ -194,7 +197,6 @@ function buildSyncPlan(input) {
 var MANIFEST_PATH = ".sync-manifest.json";
 var TRASH_ROOT = ".sync-trash";
 var CONFLICT_COPY_PATTERN = /\.conflict-\d{4}-\d{2}-\d{2}T/;
-var LARGE_CHANGE_PROTECTION_ERROR = "large change protection";
 var SyncService = class {
   constructor(vault, options) {
     this.isSyncing = false;
@@ -250,7 +252,7 @@ var SyncService = class {
           type: "sync-error",
           message: `Large change protection: ${plan.destructivePathCount} destructive actions out of ${plan.comparableExistingPathCount} comparable paths (${percentage.toFixed(1)}%). Actions: ${actions}`
         });
-        throw new Error(LARGE_CHANGE_PROTECTION_ERROR);
+        return;
       }
       this.emit({
         type: "sync-progress",
@@ -263,8 +265,6 @@ var SyncService = class {
       this.lastSyncTime = Date.now();
       this.emit({ type: "sync-complete", message: "Sync completed successfully" });
     } catch (error) {
-      if (error instanceof Error && error.message === LARGE_CHANGE_PROTECTION_ERROR)
-        throw error;
       this.emit({
         type: "sync-error",
         message: `Sync failed: ${error instanceof Error ? error.message : String(error)}`

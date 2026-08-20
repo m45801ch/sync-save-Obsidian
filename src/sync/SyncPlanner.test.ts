@@ -14,6 +14,32 @@ describe("buildSyncPlan", () => {
     expect(plan("download-only", [], [file("a.md", 2, 1)]).actions).toMatchObject([{ type: "download", path: "a.md" }]);
   });
 
+  it("does not import remote-only files in upload-delete mode", () => {
+    expect(plan("upload-delete", [], [file("remote.md", 2, 1)]).actions).toEqual([]);
+  });
+
+  it("does not import local-only files in download-delete mode", () => {
+    expect(plan("download-delete", [file("local.md", 2, 1)], []).actions).toEqual([]);
+  });
+
+  it("keeps the local side authoritative for conflicts in upload-delete mode", () => {
+    const actions = plan("upload-delete", [file("a.md", 5, 4, "local")], [file("a.md", 9, 4, "remote")], {
+      "a.md": { localMtime: 1, remoteMtime: 1, size: 4, hash: "base" },
+    }).actions;
+    expect(actions).toMatchObject([{ type: "upload", path: "a.md" }]);
+  });
+
+  it("keeps the remote side authoritative for conflicts in download-delete mode", () => {
+    const actions = plan("download-delete", [file("a.md", 9, 4, "local")], [file("a.md", 5, 4, "remote")], {
+      "a.md": { localMtime: 1, remoteMtime: 1, size: 4, hash: "base" },
+    }).actions;
+    expect(actions).toMatchObject([{ type: "download", path: "a.md" }]);
+  });
+
+  it("does not treat inherited object properties as manifest entries", () => {
+    expect(plan("upload-delete", [], [file("constructor", 2, 1)]).actions).toEqual([]);
+  });
+
   it("restores a missing side rather than deleting in bidirectional mode", () => {
     expect(plan("bidirectional", [], [file("a.md", 2, 1)], { "a.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "h" } }).actions)
       .toMatchObject([{ type: "download", path: "a.md" }]);

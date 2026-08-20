@@ -62,6 +62,8 @@ export function buildSyncPlan(input: {
   const remoteByPath = new Map(input.remote.map((entry) => [entry.path, entry]));
   const paths = new Set([...localByPath.keys(), ...remoteByPath.keys()]);
   const conflictStrategy = input.conflictStrategy ?? "keep-newer";
+  const uploadAuthoritative = input.mode === "upload-only" || input.mode === "upload-delete";
+  const downloadAuthoritative = input.mode === "download-only" || input.mode === "download-delete";
   const actions: SyncAction[] = [];
   const add = (type: SyncActionType, path: string, reason: string, targetPath?: string, source?: "local" | "remote") =>
     actions.push({ type, path, reason, targetPath, source });
@@ -95,25 +97,26 @@ export function buildSyncPlan(input: {
   for (const path of paths) {
     const local = localByPath.get(path);
     const remote = remoteByPath.get(path);
-    const previous = input.manifestFiles[path];
+    const hasPrevious = Object.prototype.hasOwnProperty.call(input.manifestFiles, path);
+    const previous = hasPrevious ? input.manifestFiles[path] : undefined;
 
     if (local && !remote) {
       if (input.mode === "download-delete" && previous) add("delete-local", path, "remote deleted after last sync");
-      else if (input.mode !== "download-only") add("upload", path, "local-only file");
+      else if (!downloadAuthoritative) add("upload", path, "local-only file");
       continue;
     }
     if (!local && remote) {
       if (input.mode === "upload-delete" && previous) add("move-remote-to-trash", path, "local deleted after last sync");
-      else if (input.mode !== "upload-only") add("download", path, "remote-only file");
+      else if (!uploadAuthoritative) add("download", path, "remote-only file");
       continue;
     }
     if (!local || !remote || local.hash === remote.hash) continue;
 
-    if (input.mode === "upload-only") {
+    if (uploadAuthoritative) {
       add("upload", path, "upload-only mode keeps local source");
       continue;
     }
-    if (input.mode === "download-only") {
+    if (downloadAuthoritative) {
       add("download", path, "download-only mode keeps remote source");
       continue;
     }

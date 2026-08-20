@@ -13,7 +13,6 @@ import {
 const MANIFEST_PATH = ".sync-manifest.json";
 const TRASH_ROOT = ".sync-trash";
 const CONFLICT_COPY_PATTERN = /\.conflict-\d{4}-\d{2}-\d{2}T/;
-const LARGE_CHANGE_PROTECTION_ERROR = "large change protection";
 
 export type SyncEventType =
   | "sync-start"
@@ -123,7 +122,7 @@ export class SyncService {
           type: "sync-error",
           message: `Large change protection: ${plan.destructivePathCount} destructive actions out of ${plan.comparableExistingPathCount} comparable paths (${percentage.toFixed(1)}%). Actions: ${actions}`,
         });
-        throw new Error(LARGE_CHANGE_PROTECTION_ERROR);
+        return;
       }
       this.emit({
         type: "sync-progress",
@@ -137,7 +136,6 @@ export class SyncService {
       this.lastSyncTime = Date.now();
       this.emit({ type: "sync-complete", message: "Sync completed successfully" });
     } catch (error) {
-      if (error instanceof Error && error.message === LARGE_CHANGE_PROTECTION_ERROR) throw error;
       this.emit({
         type: "sync-error",
         message: `Sync failed: ${error instanceof Error ? error.message : String(error)}`,

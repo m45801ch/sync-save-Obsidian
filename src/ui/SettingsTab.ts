@@ -941,7 +941,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     const strategies = [
       { value: "keep-newer", label: "保留較新檔案" },
       { value: "keep-larger", label: "保留較大檔案" },
-      { value: "smart", label: "智慧合併 (Smart Merge)" },
+      { value: "smart", label: "智慧衝突處理 (Smart Conflict)" },
     ];
     for (const strat of strategies) {
       const opt = conflictSelect.createEl("option", { value: strat.value, text: strat.label });

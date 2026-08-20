@@ -170,7 +170,7 @@ describe("SyncService", () => {
     const events: SyncEvent[] = [];
     service.on((event) => events.push(event));
 
-    await expect(service.sync()).rejects.toThrow("large change protection");
+    await expect(service.sync()).resolves.toBeUndefined();
 
     expect(vault.calls).toEqual([]);
     expect(provider.calls.filter((call) => call.startsWith("upload:") || call.startsWith("delete:"))).toEqual([]);
@@ -495,7 +495,7 @@ describe("SyncService", () => {
     expect(provider.calls.filter((call) => call.startsWith("upload:") || call.startsWith("delete:"))).toEqual([]);
   });
 
-  it("treats a legacy version 1 manifest as an empty baseline", async () => {
+  it("treats a legacy version 1 manifest as an empty baseline without importing remote-only files", async () => {
     const legacy = manifestFile(1, { "remote.md": { mtime: 1, size: 6, hash: "old" } });
     const remote = { path: "remote.md", mtime: 2, size: 6, content: encoder.encode("remote").buffer };
     const vault = createVault({});
@@ -509,7 +509,7 @@ describe("SyncService", () => {
 
     const plan = await createService(vault, provider, { syncMode: "upload-delete" }).createPlan();
 
-    expect(plan.actions).toMatchObject([{ type: "download", path: "remote.md" }]);
+    expect(plan.actions).toEqual([]);
   });
 
   it("executes transfers before remote trash actions even when the plan is reversed", async () => {
