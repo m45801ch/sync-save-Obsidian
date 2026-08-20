@@ -59,6 +59,24 @@ Search for "Sync Save" in the community plugin list.
 | Conflict Strategy | How to handle file conflicts |
 | Encryption Password | End-to-end encryption passphrase |
 
+## Sync directions, safety, and recovery
+
+Choose a sync direction deliberately:
+
+- **Bidirectional** compares local and cloud changes and applies the selected conflict strategy when both changed.
+- **Upload-only** sends local additions and edits to the cloud, without downloading cloud changes.
+- **Download-only** pulls cloud additions and edits to the vault, without uploading local changes.
+- **Upload-delete** pushes local additions and edits; a remote file that was previously synced and is now deleted locally is moved to the remote `.sync-trash/<date>/` folder.
+- **Download-delete** pulls cloud additions and edits; a local file that was previously synced and is now deleted in the cloud is moved to the selected local system or Obsidian trash.
+
+Remote deletions are never permanently deleted during sync: they always move to `.sync-trash/` first. The retention setting controls when old files in that folder may later be removed.
+
+Large-change protection is enabled by default at 50%. Before any sync mutation, Sync Save compares destructive changes with existing comparable paths. If the percentage is greater than the configured threshold, sync stops without changing local or cloud files. Set the threshold to `0` to disable this protection or `100` to allow any percentage; newly added files do not count toward the percentage.
+
+### Google Drive recovery warning
+
+If an earlier Google Drive version changed any file contents to `{}`, restore those files from an existing backup or Google Drive version history **before** re-enabling bidirectional sync. Bidirectional sync can otherwise propagate the damaged content to the other side.
+
 ## Development
 
 ```bash
