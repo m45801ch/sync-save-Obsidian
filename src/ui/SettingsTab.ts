@@ -2,6 +2,7 @@ import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import SyncSavePlugin from "../../main";
 import { BoxProvider } from "../providers/BoxProvider";
 import { generateCodeVerifier, generateCodeChallenge } from "../utils/pkce";
+import { getThresholdSelection, normalizeThreshold, THRESHOLD_PRESETS } from "./thresholdOptions";
 
 const PROVIDER_ICONS = {
   s3: "data:image/png;base64,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",
@@ -910,19 +911,38 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
 
     const thresholdSetting = card.createDiv({ cls: "sync-form-group" });
     thresholdSetting.createDiv({ cls: "sync-form-label", text: "大量變更保護門檻（%）" });
+    const thresholdSelect = thresholdSetting.createEl("select", { cls: "sync-input" });
+    for (const value of THRESHOLD_PRESETS) {
+      const label = value === 0 ? "0（關閉保護）" : value === 100 ? "100（不限制）" : `${value}`;
+      const option = thresholdSelect.createEl("option", { value: String(value), text: label });
+      if (getThresholdSelection(this.plugin.settings.largeChangeThreshold) === String(value)) option.selected = true;
+    }
+    const customOption = thresholdSelect.createEl("option", { value: "custom", text: "自訂" });
+    if (getThresholdSelection(this.plugin.settings.largeChangeThreshold) === "custom") customOption.selected = true;
+
     const thresholdInput = thresholdSetting.createEl("input", {
       cls: "sync-input",
       type: "number",
       value: String(this.plugin.settings.largeChangeThreshold),
       attr: { min: "0", max: "100", step: "1" },
     });
+    thresholdInput.style.display = getThresholdSelection(this.plugin.settings.largeChangeThreshold) === "custom" ? "" : "none";
     thresholdSetting.createDiv({
       cls: "sync-toggle-desc",
-      text: "預設 50；0 = 關閉保護；100 = 不限制。純新增檔案不計入。",
+      text: "每 10% 提供一個預設值；0 = 關閉保護；100 = 不限制；選自訂可輸入 0–100。純新增檔案不計入。",
+    });
+    thresholdSelect.addEventListener("change", () => {
+      const isCustom = thresholdSelect.value === "custom";
+      thresholdInput.style.display = isCustom ? "" : "none";
+      if (!isCustom) {
+        this.plugin.settings.largeChangeThreshold = Number(thresholdSelect.value);
+        thresholdInput.value = String(this.plugin.settings.largeChangeThreshold);
+        this.plugin.saveSettings();
+      }
     });
     thresholdInput.addEventListener("change", () => {
-      const value = Number(thresholdInput.value);
-      this.plugin.settings.largeChangeThreshold = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 50;
+      const value = normalizeThreshold(Number(thresholdInput.value));
+      this.plugin.settings.largeChangeThreshold = value;
       thresholdInput.value = String(this.plugin.settings.largeChangeThreshold);
       this.plugin.saveSettings();
     });
