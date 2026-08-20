@@ -280,7 +280,7 @@ var SyncService = class {
     }
   }
   async createPlan() {
-    var _a;
+    var _a, _b;
     const listedRemote = await this.provider.listFiles("");
     const listedManifest = listedRemote.find((file) => file.path === MANIFEST_PATH);
     const remote = listedRemote.filter(
@@ -306,7 +306,7 @@ var SyncService = class {
       const snapshot = { ...file };
       if (localByPath.has(file.path)) {
         const previous = manifestFiles[file.path];
-        if (previous && previous.remoteMtime === file.mtime && previous.size === file.size) {
+        if (previous && previous.remoteMtime === file.mtime && ((_b = previous.remoteSize) != null ? _b : previous.size) === file.size) {
           snapshot.hash = previous.hash;
         } else {
           const downloaded = await this.downloadRemoteBodyVerified(file.path, file.size);
@@ -465,7 +465,7 @@ var SyncService = class {
       throw new Error("invalid sync manifest");
     }
     for (const [path, entry] of Object.entries(parsed.files)) {
-      if (!entry || typeof entry !== "object" || !Number.isFinite(entry.localMtime) || !Number.isFinite(entry.remoteMtime) || !Number.isFinite(entry.size) || typeof entry.hash !== "string") {
+      if (!entry || typeof entry !== "object" || !Number.isFinite(entry.localMtime) || !Number.isFinite(entry.remoteMtime) || !Number.isFinite(entry.size) || entry.remoteSize !== void 0 && !Number.isFinite(entry.remoteSize) || typeof entry.hash !== "string") {
         throw new Error(`invalid sync manifest entry: ${path}`);
       }
     }
@@ -589,6 +589,7 @@ var SyncService = class {
         localMtime: localFile.mtime,
         remoteMtime: remoteFile.mtime,
         size: localFile.size,
+        remoteSize: remoteFile.size,
         hash: await Encryption.hashFile(await localFile.content())
       };
     }

@@ -175,7 +175,7 @@ export class SyncService {
       const snapshot: FileSnapshot = { ...file };
       if (localByPath.has(file.path)) {
         const previous = manifestFiles[file.path];
-        if (previous && previous.remoteMtime === file.mtime && previous.size === file.size) {
+        if (previous && previous.remoteMtime === file.mtime && (previous.remoteSize ?? previous.size) === file.size) {
           snapshot.hash = previous.hash;
         } else {
           const downloaded = await this.downloadRemoteBodyVerified(file.path, file.size);
@@ -355,6 +355,7 @@ export class SyncService {
         !Number.isFinite((entry as any).localMtime) ||
         !Number.isFinite((entry as any).remoteMtime) ||
         !Number.isFinite((entry as any).size) ||
+        (entry as any).remoteSize !== undefined && !Number.isFinite((entry as any).remoteSize) ||
         typeof (entry as any).hash !== "string"
       ) {
         throw new Error(`invalid sync manifest entry: ${path}`);
@@ -486,6 +487,7 @@ export class SyncService {
         localMtime: localFile.mtime,
         remoteMtime: remoteFile.mtime,
         size: localFile.size,
+        remoteSize: remoteFile.size,
         hash: await Encryption.hashFile(await localFile.content()),
       };
     }

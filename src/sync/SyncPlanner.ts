@@ -18,6 +18,8 @@ export interface ManifestFileState {
   localMtime: number;
   remoteMtime: number;
   size: number;
+  /** Size of the stored remote payload; differs from size when encryption is enabled. */
+  remoteSize?: number;
   hash: string;
 }
 
