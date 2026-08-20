@@ -194,6 +194,17 @@ describe("SyncService", () => {
     ]);
   });
 
+  it("scans conflict copies without a cloud provider", async () => {
+    const vault = createVault({
+      "note.conflict-2026-08-20T00-00-00-000Z.md": "conflict",
+      "plain.md": "plain",
+    });
+
+    await expect(SyncService.findConflictCopies(vault as any)).resolves.toEqual([
+      "note.conflict-2026-08-20T00-00-00-000Z.md",
+    ]);
+  });
+
   it("does not overwrite an existing local file when remote byte length differs from listed metadata", async () => {
     const vault = createVault({ "a.md": "safe local content" });
     const provider = createProvider({

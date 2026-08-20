@@ -481,28 +481,7 @@ export default class SyncSavePlugin extends Plugin {
   }
 
   async scanConflictCopies(): Promise<void> {
-    const provider = this.getProvider();
-    if (!provider) {
-      new Notice("同步備份：尚未選擇雲端服務");
-      return;
-    }
-
-    const service = new SyncService(this.app.vault, {
-      provider,
-      encryption: new Encryption(this.settings.encryptionPassword),
-      vaultName: this.app.vault.getName(),
-      syncOnSave: this.settings.syncOnSave,
-      syncInterval: this.settings.syncInterval,
-      skipHidden: this.settings.skipHidden,
-      skipPaths: this.settings.skipPaths,
-      conflictStrategy: this.settings.conflictStrategy as any,
-      syncConfig: this.settings.syncConfig,
-      syncMode: this.settings.syncMode as any,
-      localDeleteDestination: this.settings.localDeleteDestination,
-      largeChangeThreshold: this.settings.largeChangeThreshold,
-      trashRetentionDays: this.settings.trashRetentionDays,
-    });
-    const paths = await service.findConflictCopies();
+    const paths = await SyncService.findConflictCopies(this.app.vault);
     this.pendingConflictCopyPaths = paths;
 
     if (paths.length === 0) {

@@ -26,17 +26,183 @@ __export(main_exports, {
   default: () => SyncSavePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian8 = require("obsidian");
+var import_obsidian7 = require("obsidian");
+
+// src/sync/Encryption.ts
+var Encryption = class {
+  constructor(password) {
+    this.algorithm = "aes-256-gcm";
+    this.saltLength = 32;
+    this.ivLength = 16;
+    this.tagLength = 16;
+    this.password = password;
+  }
+  async deriveKey(salt) {
+    const encoder = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(this.password),
+      "PBKDF2",
+      false,
+      ["deriveKey"]
+    );
+    return crypto.subtle.deriveKey(
+      { name: "PBKDF2", salt, iterations: 6e5, hash: "SHA-256" },
+      keyMaterial,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"]
+    );
+  }
+  async encrypt(data) {
+    const salt = crypto.getRandomValues(new Uint8Array(this.saltLength));
+    const iv = crypto.getRandomValues(new Uint8Array(this.ivLength));
+    const key = await this.deriveKey(salt);
+    const encrypted = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, tagLength: this.tagLength * 8 },
+      key,
+      data
+    );
+    const header = new Uint8Array(2 + this.saltLength + this.ivLength);
+    header[0] = 1;
+    header[1] = 0;
+    header.set(salt, 2);
+    header.set(iv, 2 + this.saltLength);
+    const result = new Uint8Array(header.length + encrypted.byteLength);
+    result.set(header);
+    result.set(new Uint8Array(encrypted), header.length);
+    return result.buffer;
+  }
+  async decrypt(data) {
+    try {
+      const view = new Uint8Array(data);
+      if (view[0] !== 1)
+        return null;
+      const salt = view.slice(2, 2 + this.saltLength);
+      const iv = view.slice(2 + this.saltLength, 2 + this.saltLength + this.ivLength);
+      const ciphertext = view.slice(2 + this.saltLength + this.ivLength);
+      const key = await this.deriveKey(salt);
+      const decrypted = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv, tagLength: this.tagLength * 8 },
+        key,
+        ciphertext
+      );
+      return decrypted;
+    } catch (e) {
+      return null;
+    }
+  }
+  static async hashFile(data) {
+    const hash = await crypto.subtle.digest("SHA-256", data);
+    const hex = Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    return hex;
+  }
+  isEnabled() {
+    return this.password.length > 0;
+  }
+};
+
+// src/sync/SyncPlanner.ts
+function conflictPath(path, now) {
+  const dot = path.lastIndexOf(".");
+  const base = dot > path.lastIndexOf("/") ? path.slice(0, dot) : path;
+  const ext = dot > path.lastIndexOf("/") ? path.slice(dot) : "";
+  return `${base}.conflict-${now.toISOString().replace(/[:.]/g, "-")}${ext}`;
+}
+function buildSyncPlan(input) {
+  var _a;
+  const localByPath = new Map(input.local.map((entry) => [entry.path, entry]));
+  const remoteByPath = new Map(input.remote.map((entry) => [entry.path, entry]));
+  const paths = /* @__PURE__ */ new Set([...localByPath.keys(), ...remoteByPath.keys()]);
+  const conflictStrategy = (_a = input.conflictStrategy) != null ? _a : "keep-newer";
+  const actions = [];
+  const add = (type, path, reason, targetPath, source) => actions.push({ type, path, reason, targetPath, source });
+  const resolveConflict = (path, local, remote) => {
+    if (conflictStrategy === "smart") {
+      const localIsNewer = local.mtime > remote.mtime;
+      const remoteIsNewer = remote.mtime > local.mtime;
+      if (localIsNewer || remoteIsNewer) {
+        const winner = localIsNewer ? "local" : "remote";
+        add("create-conflict-copy", path, "both sides changed after last sync", conflictPath(path, input.now), winner === "local" ? "remote" : "local");
+        add(winner === "local" ? "upload" : "download", path, `smart conflict keeps ${winner} original`);
+        return;
+      }
+    } else {
+      const localWins = conflictStrategy === "keep-newer" ? local.mtime > remote.mtime || local.mtime === remote.mtime && local.size > remote.size : local.size > remote.size || local.size === remote.size && local.mtime > remote.mtime;
+      const remoteWins = conflictStrategy === "keep-newer" ? remote.mtime > local.mtime || local.mtime === remote.mtime && remote.size > local.size : remote.size > local.size || local.size === remote.size && remote.mtime > local.mtime;
+      if (localWins || remoteWins) {
+        add(localWins ? "upload" : "download", path, `${conflictStrategy} resolved conflict`);
+        return;
+      }
+    }
+    add("create-conflict-copy", path, "same mtime and size with different hash", conflictPath(path, input.now), "remote");
+    add("upload", path, "smart conflict keeps local original");
+  };
+  for (const path of paths) {
+    const local = localByPath.get(path);
+    const remote = remoteByPath.get(path);
+    const previous = input.manifestFiles[path];
+    if (local && !remote) {
+      if (input.mode === "download-delete" && previous)
+        add("delete-local", path, "remote deleted after last sync");
+      else if (input.mode !== "download-only")
+        add("upload", path, "local-only file");
+      continue;
+    }
+    if (!local && remote) {
+      if (input.mode === "upload-delete" && previous)
+        add("move-remote-to-trash", path, "local deleted after last sync");
+      else if (input.mode !== "upload-only")
+        add("download", path, "remote-only file");
+      continue;
+    }
+    if (!local || !remote || local.hash === remote.hash)
+      continue;
+    if (input.mode === "upload-only") {
+      add("upload", path, "upload-only mode keeps local source");
+      continue;
+    }
+    if (input.mode === "download-only") {
+      add("download", path, "download-only mode keeps remote source");
+      continue;
+    }
+    const localChanged = !previous || local.hash !== previous.hash;
+    const remoteChanged = !previous || remote.hash !== previous.hash;
+    if (localChanged && !remoteChanged)
+      add("upload", path, "local changed after last sync");
+    else if (!localChanged && remoteChanged)
+      add("download", path, "remote changed after last sync");
+    else if (localChanged && remoteChanged)
+      resolveConflict(path, local, remote);
+  }
+  const comparableExistingPaths = new Set(
+    [...paths].filter((path) => input.manifestFiles[path] || localByPath.has(path) && remoteByPath.has(path))
+  );
+  const destructivePaths = new Set(
+    actions.filter(
+      (action) => action.type === "move-remote-to-trash" || action.type === "delete-local" || action.type === "upload" && remoteByPath.has(action.path) || action.type === "download" && localByPath.has(action.path)
+    ).map((action) => action.path)
+  );
+  return {
+    actions,
+    destructivePathCount: destructivePaths.size,
+    comparableExistingPathCount: comparableExistingPaths.size
+  };
+}
 
 // src/sync/SyncService.ts
-var import_obsidian = require("obsidian");
+var MANIFEST_PATH = ".sync-manifest.json";
 var TRASH_ROOT = ".sync-trash";
+var CONFLICT_COPY_PATTERN = /\.conflict-\d{4}-\d{2}-\d{2}T/;
+var LARGE_CHANGE_PROTECTION_ERROR = "large change protection";
 var SyncService = class {
   constructor(vault, options) {
     this.isSyncing = false;
     this.listeners = [];
     this.lastSyncTime = 0;
     this.syncTimer = null;
+    this.plannedLocal = /* @__PURE__ */ new Map();
+    this.plannedRemote = /* @__PURE__ */ new Map();
     this.vault = vault;
     this.options = options;
     this.provider = options.provider;
@@ -60,7 +226,6 @@ var SyncService = class {
     return this.lastSyncTime;
   }
   async sync() {
-    var _a, _b;
     if (this.isSyncing) {
       this.emit({ type: "sync-error", message: "Sync already in progress" });
       return;
@@ -68,179 +233,38 @@ var SyncService = class {
     this.isSyncing = true;
     this.emit({ type: "sync-start", message: "Starting sync..." });
     try {
-      const connected = await this.provider.connect();
-      if (!connected) {
+      if (!await this.provider.connect()) {
         throw new Error("Failed to connect to cloud provider");
       }
-      const localFiles = await this.getLocalFiles();
-      const remoteFiles = await this.provider.listFiles("");
-      const manifest = await this.loadManifest();
-      const mode = this.options.syncMode || "bidirectional";
-      if (mode === "upload-only") {
+      const plan = await this.createPlan();
+      const percentage = plan.comparableExistingPathCount === 0 ? 0 : plan.destructivePathCount / plan.comparableExistingPathCount * 100;
+      const threshold = this.options.largeChangeThreshold;
+      if (threshold && threshold > 0 && threshold < 100 && percentage > threshold) {
+        const actionCounts = plan.actions.reduce((counts, action) => {
+          var _a;
+          counts[action.type] = ((_a = counts[action.type]) != null ? _a : 0) + 1;
+          return counts;
+        }, {});
+        const actions = Object.entries(actionCounts).map(([type, count]) => `${type}=${count}`).join(", ");
         this.emit({
-          type: "sync-progress",
-          message: `\u55AE\u5411\u5099\u4EFD\u958B\u59CB\uFF08\u50C5\u4E0A\u50B3\uFF09`,
-          progress: { current: 0, total: localFiles.length }
+          type: "sync-error",
+          message: `Large change protection: ${plan.destructivePathCount} destructive actions out of ${plan.comparableExistingPathCount} comparable paths (${percentage.toFixed(1)}%). Actions: ${actions}`
         });
-        const remoteMap = new Map(remoteFiles.map((f) => [f.path, f]));
-        let processed = 0;
-        for (const localFile of localFiles) {
-          processed++;
-          const remoteFile = remoteMap.get(localFile.path);
-          if (!remoteFile || localFile.stat.mtime > remoteFile.mtime) {
-            await this.uploadFile(localFile.path, localFile);
-            this.emit({
-              type: "sync-file",
-              message: `\u5DF2\u5099\u4EFD\u4E0A\u50B3\uFF1A${localFile.path}`,
-              file: localFile.path,
-              progress: { current: processed, total: localFiles.length }
-            });
-          }
-        }
-      } else if (mode === "download-only") {
-        this.emit({
-          type: "sync-progress",
-          message: `\u55AE\u5411\u9084\u539F\u958B\u59CB\uFF08\u50C5\u4E0B\u8F09\uFF09`,
-          progress: { current: 0, total: remoteFiles.length }
-        });
-        const localMap = new Map(localFiles.map((f) => [f.path, f]));
-        let processed = 0;
-        for (const remoteFile of remoteFiles) {
-          if (remoteFile.path === ".sync-manifest.json")
-            continue;
-          if (this.shouldSkip(remoteFile.path))
-            continue;
-          processed++;
-          const localFile = localMap.get(remoteFile.path);
-          if (!localFile || remoteFile.mtime > localFile.stat.mtime) {
-            await this.downloadFile(remoteFile.path);
-            this.emit({
-              type: "sync-file",
-              message: `\u5DF2\u4E0B\u8F09\u9084\u539F\uFF1A${remoteFile.path}`,
-              file: remoteFile.path,
-              progress: { current: processed, total: remoteFiles.length }
-            });
-          }
-        }
-      } else {
-        const deleteSynced = mode === "sync-delete";
-        this.emit({
-          type: "sync-progress",
-          message: deleteSynced ? `\u5099\u4EFD\u4E26\u540C\u6B65\u522A\u9664\uFF1A\u672C\u6A5F ${localFiles.length} \u500B\u6A94\u6848\uFF0C\u96F2\u7AEF ${remoteFiles.length} \u500B\u6A94\u6848` : `Found ${localFiles.length} local files, ${remoteFiles.length} remote files`,
-          progress: { current: 0, total: localFiles.length + remoteFiles.length }
-        });
-        const remoteMap = new Map(remoteFiles.map((f) => [f.path, f]));
-        const localMap = new Map(localFiles.map((f) => [f.path, f]));
-        let processed = 0;
-        const total = localFiles.length + remoteFiles.length;
-        for (const [localPath, localFile] of localMap) {
-          const remoteFile = remoteMap.get(localPath);
-          processed++;
-          if (!remoteFile) {
-            await this.uploadFile(localPath, localFile);
-            this.emit({
-              type: "sync-file",
-              message: `Uploaded: ${localPath}`,
-              file: localPath,
-              progress: { current: processed, total }
-            });
-          } else {
-            const manifestFile = (_a = manifest == null ? void 0 : manifest.files) == null ? void 0 : _a[localPath];
-            const lastMtime = manifestFile ? manifestFile.mtime : (manifest == null ? void 0 : manifest.timestamp) || 0;
-            const localChanged = localFile.stat.mtime > lastMtime;
-            const remoteChanged = remoteFile.mtime > lastMtime;
-            const isConflict = manifest !== null && localChanged && remoteChanged && localFile.stat.size !== remoteFile.size;
-            if (isConflict) {
-              this.emit({
-                type: "conflict",
-                message: `Conflict detected: ${localPath}`,
-                file: localPath
-              });
-              const strategy = this.options.conflictStrategy;
-              if (strategy === "keep-larger") {
-                if (localFile.stat.size > remoteFile.size) {
-                  await this.uploadFile(localPath, localFile);
-                  this.emit({ type: "sync-file", message: `Conflict resolved (larger wins): Uploaded ${localPath}`, file: localPath });
-                } else {
-                  await this.downloadFile(localPath);
-                  this.emit({ type: "sync-file", message: `Conflict resolved (larger wins): Downloaded ${localPath}`, file: localPath });
-                }
-              } else if (strategy === "smart") {
-                const extIdx = localPath.lastIndexOf(".");
-                const base = extIdx !== -1 ? localPath.substring(0, extIdx) : localPath;
-                const ext = extIdx !== -1 ? localPath.substring(extIdx) : "";
-                const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-                const conflictPath = `${base}.conflict-${timestamp}${ext}`;
-                await this.downloadFileToPath(localPath, conflictPath);
-                await this.uploadFile(localPath, localFile);
-                this.emit({
-                  type: "sync-file",
-                  message: `\u667A\u6167\u5408\u4F75\uFF1A\u672C\u6A5F\u8207\u96F2\u7AEF\u7686\u88AB\u4FEE\u6539\uFF0C\u5DF2\u5C07\u96F2\u7AEF\u7248\u672C\u5B58\u70BA\u526F\u672C\uFF1A${conflictPath}`,
-                  file: localPath
-                });
-              } else {
-                if (localFile.stat.mtime > remoteFile.mtime) {
-                  await this.uploadFile(localPath, localFile);
-                  this.emit({ type: "sync-file", message: `Conflict resolved (newer wins): Uploaded ${localPath}`, file: localPath });
-                } else {
-                  await this.downloadFile(localPath);
-                  this.emit({ type: "sync-file", message: `Conflict resolved (newer wins): Downloaded ${localPath}`, file: localPath });
-                }
-              }
-            } else if (localFile.stat.mtime > remoteFile.mtime) {
-              await this.uploadFile(localPath, localFile);
-              this.emit({
-                type: "sync-file",
-                message: `Updated: ${localPath}`,
-                file: localPath,
-                progress: { current: processed, total }
-              });
-            } else if (localFile.stat.mtime < remoteFile.mtime) {
-              await this.downloadFile(localPath);
-              this.emit({
-                type: "sync-file",
-                message: `Downloaded: ${localPath}`,
-                file: localPath,
-                progress: { current: processed, total }
-              });
-            }
-          }
-        }
-        for (const remotePath of remoteFiles) {
-          if (remotePath.path === ".sync-manifest.json")
-            continue;
-          if (this.shouldSkip(remotePath.path))
-            continue;
-          if (!localMap.has(remotePath.path)) {
-            processed++;
-            if (deleteSynced && ((_b = manifest == null ? void 0 : manifest.files) == null ? void 0 : _b[remotePath.path])) {
-              await this.moveToTrash(remotePath.path);
-              this.emit({
-                type: "sync-file",
-                message: `\u672C\u6A5F\u5DF2\u522A\u9664\uFF0C\u5DF2\u79FB\u81F3\u96F2\u7AEF\u5783\u573E\u6876\uFF1A${remotePath.path}`,
-                file: remotePath.path,
-                progress: { current: processed, total }
-              });
-            } else {
-              await this.downloadFile(remotePath.path);
-              this.emit({
-                type: "sync-file",
-                message: `Downloaded (new): ${remotePath.path}`,
-                file: remotePath.path,
-                progress: { current: processed, total }
-              });
-            }
-          }
-        }
+        throw new Error(LARGE_CHANGE_PROTECTION_ERROR);
       }
-      const updatedLocalFiles = await this.getLocalFiles();
-      await this.saveManifest(updatedLocalFiles);
-      if (mode === "sync-delete") {
+      this.emit({
+        type: "sync-progress",
+        message: `Planned ${plan.actions.length} sync actions`,
+        progress: { current: 0, total: plan.actions.length }
+      });
+      await this.executePlan(plan);
+      if (this.getSyncMode() === "upload-delete")
         await this.cleanupTrash();
-      }
       this.lastSyncTime = Date.now();
       this.emit({ type: "sync-complete", message: "Sync completed successfully" });
     } catch (error) {
+      if (error instanceof Error && error.message === LARGE_CHANGE_PROTECTION_ERROR)
+        throw error;
       this.emit({
         type: "sync-error",
         message: `Sync failed: ${error instanceof Error ? error.message : String(error)}`
@@ -253,121 +277,266 @@ var SyncService = class {
       }
     }
   }
+  async createPlan() {
+    var _a;
+    const listedRemote = await this.provider.listFiles("");
+    const listedManifest = listedRemote.find((file) => file.path === MANIFEST_PATH);
+    const remote = listedRemote.filter(
+      (file) => file.path !== MANIFEST_PATH && !this.isTrashPath(file.path) && !this.shouldSkip(file.path)
+    );
+    const local = await this.getLocalFiles();
+    const manifest = await this.loadManifest(listedManifest);
+    const manifestFiles = (_a = manifest == null ? void 0 : manifest.files) != null ? _a : {};
+    const localByPath = new Map(local.map((file) => [file.path, file]));
+    const remoteByPath = new Map(remote.map((file) => [file.path, file]));
+    for (const file of local) {
+      if (!remoteByPath.has(file.path))
+        continue;
+      const previous = manifestFiles[file.path];
+      if (previous && previous.localMtime === file.mtime && previous.size === file.size) {
+        file.hash = previous.hash;
+      } else {
+        file.hash = await Encryption.hashFile(await file.content());
+      }
+    }
+    const remoteSnapshots = [];
+    for (const file of remote) {
+      const snapshot = { ...file };
+      if (localByPath.has(file.path)) {
+        const previous = manifestFiles[file.path];
+        if (previous && previous.remoteMtime === file.mtime && previous.size === file.size) {
+          snapshot.hash = previous.hash;
+        } else {
+          const downloaded = await this.downloadRemoteBodyVerified(file.path, file.size);
+          snapshot.hash = await Encryption.hashFile(await this.decryptOrThrow(downloaded.content));
+        }
+      }
+      remoteSnapshots.push(snapshot);
+    }
+    this.plannedLocal = localByPath;
+    this.plannedRemote = new Map(remoteSnapshots.map((file) => [file.path, file]));
+    return buildSyncPlan({
+      local,
+      remote: remoteSnapshots,
+      manifestFiles,
+      mode: this.getSyncMode(),
+      conflictStrategy: this.options.conflictStrategy,
+      now: new Date()
+    });
+  }
+  static async findConflictCopies(vault) {
+    return vault.getFiles().map((file) => file.path).filter((path) => CONFLICT_COPY_PATTERN.test(path));
+  }
+  async findConflictCopies() {
+    return SyncService.findConflictCopies(this.vault);
+  }
+  async executePlan(plan) {
+    const order = {
+      "create-conflict-copy": 0,
+      upload: 1,
+      download: 1,
+      "move-remote-to-trash": 2,
+      "delete-local": 2,
+      skip: 3
+    };
+    const actions = plan.actions.map((action, index) => ({ action, index })).sort((left, right) => order[left.action.type] - order[right.action.type] || left.index - right.index).map(({ action }) => action);
+    let current = 0;
+    for (const action of actions) {
+      await this.executeAction(action);
+      current++;
+      this.emit({
+        type: "sync-file",
+        message: `${action.type}: ${action.path}`,
+        file: action.path,
+        progress: { current, total: actions.length }
+      });
+    }
+    await this.saveManifest();
+  }
+  async executeAction(action) {
+    if (action.type === "skip")
+      return;
+    if (action.type === "create-conflict-copy") {
+      if (!action.targetPath)
+        throw new Error(`missing conflict target: ${action.path}`);
+      this.emit({ type: "conflict", message: `Conflict detected: ${action.path}`, file: action.path });
+      if (action.source === "local") {
+        const local = this.requireLocal(action.path);
+        await this.writeVerifiedToPath(action.targetPath, await local.content());
+      } else {
+        const remote = this.requireRemote(action.path);
+        await this.downloadVerifiedToPath(action.path, action.targetPath, remote.size);
+      }
+      return;
+    }
+    if (action.type === "upload") {
+      const local = this.requireLocal(action.path);
+      await this.uploadContent(action.path, await local.content(), local.mtime);
+      return;
+    }
+    if (action.type === "download") {
+      const remote = this.requireRemote(action.path);
+      await this.downloadVerifiedToPath(action.path, action.path, remote.size);
+      return;
+    }
+    if (action.type === "move-remote-to-trash") {
+      const remote = this.requireRemote(action.path);
+      await this.moveToTrash(action.path, remote.size);
+      return;
+    }
+    if (this.options.localDeleteDestination === "obsidian-trash") {
+      await this.vault.adapter.trashLocal(action.path);
+    } else {
+      await this.vault.adapter.trashSystem(action.path);
+    }
+  }
+  requireLocal(path) {
+    const file = this.plannedLocal.get(path);
+    if (!file)
+      throw new Error(`missing planned local file: ${path}`);
+    return file;
+  }
+  requireRemote(path) {
+    const file = this.plannedRemote.get(path);
+    if (!file)
+      throw new Error(`missing planned remote file: ${path}`);
+    return file;
+  }
+  getSyncMode() {
+    const mode = this.options.syncMode;
+    return mode === "sync-delete" ? "upload-delete" : mode != null ? mode : "bidirectional";
+  }
   async getLocalFiles() {
     const files = [];
-    const allFiles = this.vault.getFiles();
-    for (const file of allFiles) {
+    for (const file of this.vault.getFiles()) {
       if (this.shouldSkip(file.path))
         continue;
       const stat = await this.vault.adapter.stat(file.path);
       if (!stat)
         continue;
-      const content = await this.vault.readBinary(file);
       files.push({
         path: file.path,
-        stat: { mtime: stat.mtime, size: stat.size },
-        content
+        mtime: stat.mtime,
+        size: stat.size,
+        content: () => this.vault.readBinary(file)
       });
     }
     return files;
   }
   shouldSkip(path) {
     const segments = path.replace(/\\/g, "/").split("/");
-    for (const seg of segments) {
-      if (this.options.skipHidden && seg.startsWith("."))
+    for (const segment of segments) {
+      if (this.options.skipHidden && segment.startsWith("."))
         return true;
-      if (seg.startsWith("_") && !this.options.syncConfig)
+      if (segment.startsWith("_") && !this.options.syncConfig)
         return true;
     }
     if (this.isTrashPath(path))
       return true;
     if (path.startsWith(".obsidian/") && !this.options.syncConfig)
       return true;
-    for (const pattern of this.options.skipPaths) {
-      if (path.match(pattern))
-        return true;
-    }
-    return false;
+    return this.options.skipPaths.some((pattern) => path.match(pattern));
   }
-  async loadManifest() {
-    try {
-      const raw = await this.provider.downloadFile(".sync-manifest.json");
-      if (!raw)
-        return null;
-      let data = raw.content;
-      if (this.encryption.isEnabled()) {
-        const decrypted = await this.encryption.decrypt(data);
-        if (!decrypted)
-          return null;
-        data = decrypted;
-      }
-      const decoder = new TextDecoder();
-      return JSON.parse(decoder.decode(data));
-    } catch (e) {
+  async loadManifest(listedManifest) {
+    if (!listedManifest)
       return null;
+    const raw = await this.downloadRemoteBodyVerified(MANIFEST_PATH, listedManifest.size);
+    const data = await this.decryptOrThrow(raw.content);
+    let parsed;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(data));
+    } catch (error) {
+      throw new Error(`invalid sync manifest: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("invalid sync manifest");
+    }
+    if (parsed.version === 1) {
+      return {
+        version: 2,
+        files: {},
+        timestamp: parsed.timestamp,
+        vaultName: parsed.vaultName
+      };
+    }
+    if (parsed.version !== 2 || !parsed.files || typeof parsed.files !== "object" || Array.isArray(parsed.files)) {
+      throw new Error("invalid sync manifest");
+    }
+    for (const [path, entry] of Object.entries(parsed.files)) {
+      if (!entry || typeof entry !== "object" || !Number.isFinite(entry.localMtime) || !Number.isFinite(entry.remoteMtime) || !Number.isFinite(entry.size) || typeof entry.hash !== "string") {
+        throw new Error(`invalid sync manifest entry: ${path}`);
+      }
+    }
+    return parsed;
+  }
+  async uploadContent(path, content, mtime) {
+    const data = this.encryption.isEnabled() ? await this.encryption.encrypt(content) : content;
+    await this.provider.uploadFile(path, data, mtime);
+  }
+  async downloadRemoteBodyVerified(path, expectedSize) {
+    const remote = await this.provider.downloadFile(path);
+    if (remote.content.byteLength !== expectedSize || remote.size !== expectedSize) {
+      throw new Error(`download size mismatch: ${path}`);
+    }
+    return remote;
+  }
+  async decryptOrThrow(content) {
+    if (!this.encryption.isEnabled())
+      return content;
+    const decrypted = await this.encryption.decrypt(content);
+    if (!decrypted)
+      throw new Error("decryption failed");
+    return decrypted;
+  }
+  async downloadVerifiedToPath(remotePath, localPath, expectedSize) {
+    const remote = await this.downloadRemoteBodyVerified(remotePath, expectedSize);
+    await this.writeVerifiedToPath(localPath, await this.decryptOrThrow(remote.content));
+  }
+  async writeVerifiedToPath(path, data) {
+    await this.ensureParentFolder(path);
+    const tempPath = `${path}.sync-save-tmp-${Date.now()}`;
+    try {
+      await this.vault.createBinary(tempPath, data);
+      const tempStat = await this.vault.adapter.stat(tempPath);
+      if (!tempStat || tempStat.size !== data.byteLength) {
+        throw new Error(`temporary write mismatch: ${path}`);
+      }
+      await this.replacePathAtomically(tempPath, path);
+    } catch (error) {
+      if (await this.vault.adapter.exists(tempPath))
+        await this.vault.adapter.remove(tempPath);
+      throw error;
     }
   }
-  async uploadFile(path, file) {
-    let data = file.content;
-    if (this.encryption.isEnabled()) {
-      data = await this.encryption.encrypt(data);
+  async replacePathAtomically(tempPath, targetPath) {
+    try {
+      await this.vault.adapter.rename(tempPath, targetPath);
+    } catch (error) {
+      if (await this.vault.adapter.exists(tempPath))
+        await this.vault.adapter.remove(tempPath);
+      throw error;
     }
-    await this.provider.uploadFile(path, data, file.stat.mtime);
   }
-  async downloadFile(path) {
-    await this.downloadFileToPath(path, path);
-  }
-  async downloadFileToPath(remotePath, localPath) {
-    let remote = await this.provider.downloadFile(remotePath);
-    if (!remote)
+  async ensureParentFolder(path) {
+    const slash = path.lastIndexOf("/");
+    if (slash < 0)
       return;
-    let data = remote.content;
-    if (this.encryption.isEnabled()) {
-      const decrypted = await this.encryption.decrypt(data);
-      if (decrypted)
-        data = decrypted;
-    }
-    const dir = localPath.substring(0, localPath.lastIndexOf("/"));
-    if (dir) {
-      const dirExists = await this.vault.adapter.exists(dir);
-      if (!dirExists) {
-        const existingDir = this.vault.getAbstractFileByPath(dir);
-        if (!existingDir) {
-          await this.vault.createFolder(dir);
-        }
-      }
-    }
-    const fileExists = await this.vault.adapter.exists(localPath);
-    if (fileExists) {
-      const existing = this.vault.getAbstractFileByPath(localPath);
-      if (existing instanceof import_obsidian.TFile) {
-        await this.vault.modifyBinary(existing, data);
-      } else {
-        await this.vault.adapter.writeBinary(localPath, data);
-      }
-    } else {
-      await this.vault.createBinary(localPath, data);
+    const directory = path.slice(0, slash);
+    if (!await this.vault.adapter.exists(directory) && !this.vault.getAbstractFileByPath(directory)) {
+      await this.vault.createFolder(directory);
     }
   }
   isTrashPath(path) {
-    return path === TRASH_ROOT || path.startsWith(TRASH_ROOT + "/");
+    return path === TRASH_ROOT || path.startsWith(`${TRASH_ROOT}/`);
   }
   getTrashDateFolder() {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   }
-  async moveToTrash(path) {
-    const remote = await this.provider.downloadFile(path);
-    if (!remote)
-      return;
-    let data = remote.content;
-    if (this.encryption.isEnabled()) {
-      const decrypted = await this.encryption.decrypt(data);
-      if (decrypted)
-        data = decrypted;
-    }
+  async moveToTrash(path, expectedSize) {
+    const remote = await this.downloadRemoteBodyVerified(path, expectedSize);
     const trashPath = `${TRASH_ROOT}/${this.getTrashDateFolder()}/${path}`;
-    await this.uploadFile(trashPath, { content: data, stat: { mtime: Date.now() } });
+    await this.provider.uploadFile(trashPath, remote.content, remote.mtime);
     await this.provider.deleteFile(path);
   }
   async cleanupTrash() {
@@ -381,53 +550,54 @@ var SyncService = class {
       trashFiles = [];
     }
     const toDelete = [];
-    for (const f of trashFiles) {
-      if (!this.isTrashPath(f.path))
+    for (const file of trashFiles) {
+      if (!this.isTrashPath(file.path))
         continue;
-      const segs = f.path.split("/");
-      if (segs.length < 2)
+      const segments = file.path.split("/");
+      if (segments.length < 2)
         continue;
-      const dateTs = new Date(`${segs[1]}T00:00:00`).getTime();
-      if (isNaN(dateTs))
+      const dateTimestamp = new Date(`${segments[1]}T00:00:00`).getTime();
+      if (isNaN(dateTimestamp))
         continue;
-      if (dateTs < cutoff)
-        toDelete.push(f.path);
+      if (dateTimestamp < cutoff)
+        toDelete.push(file.path);
     }
     for (const path of toDelete) {
       try {
         await this.provider.deleteFile(path);
         this.emit({ type: "sync-file", message: `\u5DF2\u6E05\u9664\u5783\u573E\u6876\u6A94\u6848\uFF1A${path}` });
-      } catch (e) {
+      } catch (error) {
         this.emit({
           type: "sync-error",
-          message: `\u6E05\u9664\u5783\u573E\u6876\u5931\u6557\uFF1A${path} (${e instanceof Error ? e.message : String(e)})`
+          message: `\u6E05\u9664\u5783\u573E\u6876\u5931\u6557\uFF1A${path} (${error instanceof Error ? error.message : String(error)})`
         });
       }
     }
   }
-  async saveManifest(localFiles) {
-    const filesRecord = {};
-    for (const file of localFiles) {
-      filesRecord[file.path] = {
-        mtime: file.stat.mtime,
-        size: file.stat.size,
-        hash: ""
+  async saveManifest() {
+    const local = await this.getLocalFiles();
+    const remote = (await this.provider.listFiles("")).filter((file) => file.path !== MANIFEST_PATH && !this.isTrashPath(file.path));
+    const remoteByPath = new Map(remote.map((file) => [file.path, file]));
+    const files = {};
+    for (const localFile of local) {
+      const remoteFile = remoteByPath.get(localFile.path);
+      if (!remoteFile)
+        continue;
+      files[localFile.path] = {
+        localMtime: localFile.mtime,
+        remoteMtime: remoteFile.mtime,
+        size: localFile.size,
+        hash: await Encryption.hashFile(await localFile.content())
       };
     }
     const manifest = {
-      version: 1,
-      files: filesRecord,
+      version: 2,
+      files,
       timestamp: Date.now(),
-      vaultName: this.vault.getName()
+      vaultName: this.options.vaultName
     };
-    const encoder = new TextEncoder();
-    let data = encoder.encode(JSON.stringify(manifest)).buffer;
-    if (this.encryption.isEnabled()) {
-      const encrypted = await this.encryption.encrypt(data);
-      if (encrypted)
-        data = encrypted;
-    }
-    await this.provider.uploadFile(".sync-manifest.json", data, Date.now());
+    const content = new TextEncoder().encode(JSON.stringify(manifest)).buffer;
+    await this.uploadContent(MANIFEST_PATH, content, manifest.timestamp);
   }
   startAutoSync() {
     if (this.options.syncInterval <= 0)
@@ -629,7 +799,7 @@ ${await this.sha256Hex(enc.encode(canonicalRequest))}`;
 };
 
 // src/providers/WebDAVProvider.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian = require("obsidian");
 var RequestUrlResponseWrapper = class {
   constructor(res) {
     this.res = res;
@@ -795,7 +965,7 @@ var WebDAVProvider = class extends CloudProvider {
       headers["Depth"] = "1";
       headers["Content-Type"] = "application/xml";
     }
-    const response = await (0, import_obsidian2.requestUrl)({
+    const response = await (0, import_obsidian.requestUrl)({
       url,
       method,
       headers,
@@ -807,7 +977,7 @@ var WebDAVProvider = class extends CloudProvider {
 };
 
 // src/providers/DropboxProvider.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian2 = require("obsidian");
 var DEFAULT_DROPBOX_CLIENT_ID = "fwetpaegys8iwjf";
 var RequestUrlResponseWrapper2 = class {
   constructor(res) {
@@ -859,7 +1029,7 @@ var DropboxProvider = class extends CloudProvider {
         params.append("code_verifier", verifier);
       }
       params.append("redirect_uri", "obsidian://sync-save-auth");
-      const resp = await (0, import_obsidian3.requestUrl)({
+      const resp = await (0, import_obsidian2.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -896,7 +1066,7 @@ var DropboxProvider = class extends CloudProvider {
       params.append("grant_type", "refresh_token");
       params.append("refresh_token", this.config.refreshToken);
       params.append("client_id", this.config.clientId || DEFAULT_DROPBOX_CLIENT_ID);
-      const resp = await (0, import_obsidian3.requestUrl)({
+      const resp = await (0, import_obsidian2.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -1090,7 +1260,7 @@ var DropboxProvider = class extends CloudProvider {
     if (body && !(extraHeaders == null ? void 0 : extraHeaders["Content-Type"])) {
       headers["Content-Type"] = "application/json";
     }
-    const response = await (0, import_obsidian3.requestUrl)({
+    const response = await (0, import_obsidian2.requestUrl)({
       url,
       method: "POST",
       headers,
@@ -1102,7 +1272,7 @@ var DropboxProvider = class extends CloudProvider {
 };
 
 // src/providers/OneDriveProvider.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 var DEFAULT_ONEDRIVE_CLIENT_ID = "7b4ca8e0-871f-48c1-8a90-7babce6c812c";
 var RequestUrlResponseWrapper3 = class {
   constructor(res) {
@@ -1157,7 +1327,7 @@ var OneDriveProvider = class extends CloudProvider {
         params.append("code_verifier", verifier);
       }
       params.append("redirect_uri", this.getRedirectUri());
-      const resp = await (0, import_obsidian4.requestUrl)({
+      const resp = await (0, import_obsidian3.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -1195,7 +1365,7 @@ var OneDriveProvider = class extends CloudProvider {
       params.append("refresh_token", this.config.refreshToken);
       params.append("client_id", this.config.clientId || DEFAULT_ONEDRIVE_CLIENT_ID);
       params.append("redirect_uri", this.getRedirectUri());
-      const resp = await (0, import_obsidian4.requestUrl)({
+      const resp = await (0, import_obsidian3.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -1348,7 +1518,7 @@ var OneDriveProvider = class extends CloudProvider {
     if (body || method === "PUT") {
       headers["Content-Type"] = "application/octet-stream";
     }
-    const response = await (0, import_obsidian4.requestUrl)({
+    const response = await (0, import_obsidian3.requestUrl)({
       url,
       method,
       headers,
@@ -1360,9 +1530,47 @@ var OneDriveProvider = class extends CloudProvider {
 };
 
 // src/providers/GoogleDriveProvider.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 var DEFAULT_GOOGLE_CLIENT_ID = "147064468840-cqaqbijf1g60e6k2sonu18rr8jt30gkh.apps.googleusercontent.com";
 var DEFAULT_GOOGLE_CLIENT_SECRET = "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";
+function encodeGoogleDriveRequest(body, fileContent) {
+  if (body instanceof ArrayBuffer && !fileContent) {
+    return { body, contentType: "application/octet-stream" };
+  }
+  if (fileContent !== void 0) {
+    const boundary = `boundary_sync_save_${Date.now()}`;
+    const encoder = new TextEncoder();
+    const parts = [
+      encoder.encode(`--${boundary}\r
+Content-Type: application/json; charset=UTF-8\r
+\r
+${JSON.stringify(body || {})}\r
+`),
+      encoder.encode(`--${boundary}\r
+Content-Type: application/octet-stream\r
+\r
+`),
+      new Uint8Array(fileContent),
+      encoder.encode(`\r
+--${boundary}--\r
+`)
+    ];
+    const combined = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+    let offset = 0;
+    for (const part of parts) {
+      combined.set(part, offset);
+      offset += part.length;
+    }
+    return { body: combined.buffer, contentType: `multipart/related; boundary=${boundary}` };
+  }
+  if (body !== void 0) {
+    return { body: JSON.stringify(body), contentType: "application/json" };
+  }
+  return {};
+}
+function joinGoogleDrivePath(parentPath, name) {
+  return parentPath ? `${parentPath}/${name}` : name;
+}
 var RequestUrlResponseWrapper4 = class {
   constructor(res) {
     this.res = res;
@@ -1417,7 +1625,7 @@ var GoogleDriveProvider = class extends CloudProvider {
         params.append("code_verifier", verifier);
       }
       params.append("redirect_uri", "http://localhost");
-      const resp = await (0, import_obsidian5.requestUrl)({
+      const resp = await (0, import_obsidian4.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -1455,7 +1663,7 @@ var GoogleDriveProvider = class extends CloudProvider {
       params.append("refresh_token", this.config.refreshToken);
       params.append("client_id", this.config.clientId || DEFAULT_GOOGLE_CLIENT_ID);
       params.append("client_secret", this.config.clientSecret || DEFAULT_GOOGLE_CLIENT_SECRET);
-      const resp = await (0, import_obsidian5.requestUrl)({
+      const resp = await (0, import_obsidian4.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -1535,45 +1743,38 @@ var GoogleDriveProvider = class extends CloudProvider {
     if (!this.rootFolderId)
       return [];
     const allFiles = [];
-    const folders = { "": this.rootFolderId };
-    let pageToken = null;
-    do {
-      let q = `'${this.rootFolderId}' in parents and trashed=false`;
-      let url = `${this.apiBase}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,modifiedTime,size,parents)&pageSize=1000`;
-      if (pageToken)
-        url += `&pageToken=${pageToken}`;
-      const resp = await this.request("GET", url);
-      if (!resp.ok)
-        throw new Error(`Google Drive list failed: ${resp.status}`);
-      const data = await resp.json();
-      for (const item of data.files || []) {
-        if (item.mimeType === "application/vnd.google-apps.folder") {
-          const parentPath = this.getParentPath(item.parents, folders) || "";
-          folders[`${parentPath}/${item.name}`] = item.id;
-        } else {
-          const parentPath = this.getParentPath(item.parents, folders) || "";
-          allFiles.push({
-            path: `${parentPath}/${item.name}`.replace(/^\//, ""),
-            mtime: new Date(item.modifiedTime).getTime(),
-            size: parseInt(item.size || "0")
-          });
+    const folders = [{ id: this.rootFolderId, path: "" }];
+    while (folders.length > 0) {
+      const folder = folders.shift();
+      let pageToken;
+      do {
+        const q = `'${folder.id}' in parents and trashed=false`;
+        let url = `${this.apiBase}/files?q=${encodeURIComponent(q)}&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size)&pageSize=1000`;
+        if (pageToken)
+          url += `&pageToken=${pageToken}`;
+        const resp = await this.request("GET", url);
+        if (!resp.ok)
+          throw new Error(`Google Drive list failed: ${resp.status}`);
+        const data = await resp.json();
+        for (const item of data.files || []) {
+          const path = joinGoogleDrivePath(folder.path, item.name);
+          if (item.mimeType === "application/vnd.google-apps.folder") {
+            folders.push({ id: item.id, path });
+          } else {
+            allFiles.push({
+              path,
+              mtime: Date.parse(item.modifiedTime),
+              size: Number(item.size || 0)
+            });
+          }
         }
-      }
-      pageToken = data.nextPageToken || null;
-    } while (pageToken);
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+    }
     return allFiles;
   }
-  getParentPath(parents, folderMap) {
-    if (!parents || parents.length === 0)
-      return null;
-    for (const [path, id] of Object.entries(folderMap)) {
-      if (id === parents[0])
-        return path;
-    }
-    return null;
-  }
   async downloadFile(path) {
-    const fileId = await this.resolveFileId(path);
+    const fileId = await this.findFileId(path);
     if (!fileId)
       throw new Error(`File not found: ${path}`);
     const resp = await this.request(
@@ -1599,15 +1800,13 @@ var GoogleDriveProvider = class extends CloudProvider {
   async uploadFile(path, content, mtime) {
     if (!this.rootFolderId)
       throw new Error("Not connected");
-    const existingId = await this.resolveFileId(path);
-    const parentId = await this.ensureParentFolders(path);
+    const existingId = await this.findFileId(path);
     const fileName = path.split("/").pop() || path;
     if (existingId) {
       const resp = await this.request(
         "PATCH",
         `${this.uploadBase}/files/${existingId}?uploadType=media`,
-        content,
-        { "Content-Type": "application/octet-stream" }
+        content
       );
       if (!resp.ok)
         throw new Error(`Google Drive upload content failed: ${resp.status}`);
@@ -1619,6 +1818,7 @@ var GoogleDriveProvider = class extends CloudProvider {
       if (!metaResp.ok)
         throw new Error(`Google Drive update metadata failed: ${metaResp.status}`);
     } else {
+      const parentId = await this.ensureParentFolders(path);
       const metadata = {
         name: fileName,
         parents: [parentId],
@@ -1638,7 +1838,7 @@ var GoogleDriveProvider = class extends CloudProvider {
     }
   }
   async deleteFile(path) {
-    const fileId = await this.resolveFileId(path);
+    const fileId = await this.findFileId(path);
     if (!fileId)
       return;
     const resp = await this.request("DELETE", `${this.apiBase}/files/${fileId}`);
@@ -1736,15 +1936,28 @@ var GoogleDriveProvider = class extends CloudProvider {
     }
     return currentParentId;
   }
-  async resolveFileId(path) {
-    var _a, _b;
+  async findFileId(path) {
+    var _a, _b, _c, _d;
     if (!this.rootFolderId)
       return null;
     const parts = path.split("/");
     const fileName = parts.pop();
     if (!fileName)
       return null;
-    const parentId = await this.ensureParentFolders(path);
+    let parentId = this.rootFolderId;
+    for (const part of parts) {
+      const q2 = encodeURIComponent(
+        `name='${part.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
+      );
+      const resp2 = await this.request("GET", `${this.apiBase}/files?q=${q2}&fields=files(id,name)`);
+      if (!resp2.ok)
+        return null;
+      const data2 = await resp2.json();
+      const folderId = (_b = (_a = data2.files) == null ? void 0 : _a[0]) == null ? void 0 : _b.id;
+      if (!folderId)
+        return null;
+      parentId = folderId;
+    }
     const q = encodeURIComponent(
       `name='${fileName.replace(/'/g, "\\'")}' and '${parentId}' in parents and trashed=false`
     );
@@ -1752,52 +1965,20 @@ var GoogleDriveProvider = class extends CloudProvider {
     if (!resp.ok)
       return null;
     const data = await resp.json();
-    return ((_b = (_a = data.files) == null ? void 0 : _a[0]) == null ? void 0 : _b.id) || null;
+    return ((_d = (_c = data.files) == null ? void 0 : _c[0]) == null ? void 0 : _d.id) || null;
   }
   async request(method, url, body, extraHeaders, fileContent) {
+    const encoded = encodeGoogleDriveRequest(body, fileContent);
     const headers = {
       Authorization: `Bearer ${this.accessToken || this.config.accessToken}`,
-      ...extraHeaders
+      ...extraHeaders,
+      ...encoded.contentType ? { "Content-Type": encoded.contentType } : {}
     };
-    let finalBody;
-    if (fileContent) {
-      const boundary = `boundary_sync_save_${Date.now()}`;
-      const encoder = new TextEncoder();
-      const parts = [];
-      parts.push(encoder.encode(`--${boundary}\r
-Content-Type: application/json; charset=UTF-8\r
-\r
-${JSON.stringify(body || {})}\r
-`));
-      parts.push(encoder.encode(`--${boundary}\r
-Content-Type: application/octet-stream\r
-\r
-`));
-      parts.push(new Uint8Array(fileContent));
-      parts.push(encoder.encode(`\r
---${boundary}--\r
-`));
-      let totalLength = 0;
-      for (const part of parts) {
-        totalLength += part.length;
-      }
-      const combined = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const part of parts) {
-        combined.set(part, offset);
-        offset += part.length;
-      }
-      finalBody = combined.buffer;
-      headers["Content-Type"] = `multipart/related; boundary=${boundary}`;
-    } else if (body) {
-      headers["Content-Type"] = "application/json";
-      finalBody = JSON.stringify(body);
-    }
-    const response = await (0, import_obsidian5.requestUrl)({
+    const response = await (0, import_obsidian4.requestUrl)({
       url,
       method,
       headers,
-      body: finalBody,
+      body: encoded.body,
       throw: false
     });
     return new RequestUrlResponseWrapper4(response);
@@ -1805,7 +1986,7 @@ Content-Type: application/octet-stream\r
 };
 
 // src/providers/BoxProvider.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 var RequestUrlResponseWrapper5 = class {
   constructor(res) {
     this.res = res;
@@ -1857,7 +2038,7 @@ var BoxProvider = class extends CloudProvider {
       params.append("grant_type", "client_credentials");
       params.append("client_id", this.config.clientId);
       params.append("client_secret", this.config.clientSecret);
-      const resp = await (0, import_obsidian6.requestUrl)({
+      const resp = await (0, import_obsidian5.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -1887,7 +2068,7 @@ var BoxProvider = class extends CloudProvider {
       params.append("client_id", this.config.clientId);
       params.append("client_secret", this.config.clientSecret);
       params.append("redirect_uri", "http://localhost");
-      const resp = await (0, import_obsidian6.requestUrl)({
+      const resp = await (0, import_obsidian5.requestUrl)({
         url,
         method: "POST",
         headers: {
@@ -1926,7 +2107,7 @@ var BoxProvider = class extends CloudProvider {
         params.append("refresh_token", this.config.refreshToken);
         params.append("client_id", this.config.clientId);
         params.append("client_secret", this.config.clientSecret);
-        const resp = await (0, import_obsidian6.requestUrl)({
+        const resp = await (0, import_obsidian5.requestUrl)({
           url,
           method: "POST",
           headers: {
@@ -1949,7 +2130,7 @@ var BoxProvider = class extends CloudProvider {
       } else {
         const helperUrl = this.config.authHelperUrl || "https://sync-save-obsidian.vercel.app";
         const url = `${helperUrl}/api/box/refresh`;
-        const resp = await (0, import_obsidian6.requestUrl)({
+        const resp = await (0, import_obsidian5.requestUrl)({
           url: `${url}?refresh_token=${encodeURIComponent(this.config.refreshToken)}`,
           method: "GET",
           throw: false
@@ -2249,7 +2430,7 @@ Content-Type: application/octet-stream\r
       headers["Content-Type"] = "application/json";
       finalBody = JSON.stringify(body);
     }
-    const response = await (0, import_obsidian6.requestUrl)({
+    const response = await (0, import_obsidian5.requestUrl)({
       url,
       method,
       headers,
@@ -2260,80 +2441,6 @@ Content-Type: application/octet-stream\r
   }
   async uploadRequest(method, url, fileContent, fileName, attributes) {
     return this.request(method, url, attributes, void 0, fileContent, fileName);
-  }
-};
-
-// src/sync/Encryption.ts
-var Encryption = class {
-  constructor(password) {
-    this.algorithm = "aes-256-gcm";
-    this.saltLength = 32;
-    this.ivLength = 16;
-    this.tagLength = 16;
-    this.password = password;
-  }
-  async deriveKey(salt) {
-    const encoder = new TextEncoder();
-    const keyMaterial = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(this.password),
-      "PBKDF2",
-      false,
-      ["deriveKey"]
-    );
-    return crypto.subtle.deriveKey(
-      { name: "PBKDF2", salt, iterations: 6e5, hash: "SHA-256" },
-      keyMaterial,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"]
-    );
-  }
-  async encrypt(data) {
-    const salt = crypto.getRandomValues(new Uint8Array(this.saltLength));
-    const iv = crypto.getRandomValues(new Uint8Array(this.ivLength));
-    const key = await this.deriveKey(salt);
-    const encrypted = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv, tagLength: this.tagLength * 8 },
-      key,
-      data
-    );
-    const header = new Uint8Array(2 + this.saltLength + this.ivLength);
-    header[0] = 1;
-    header[1] = 0;
-    header.set(salt, 2);
-    header.set(iv, 2 + this.saltLength);
-    const result = new Uint8Array(header.length + encrypted.byteLength);
-    result.set(header);
-    result.set(new Uint8Array(encrypted), header.length);
-    return result.buffer;
-  }
-  async decrypt(data) {
-    try {
-      const view = new Uint8Array(data);
-      if (view[0] !== 1)
-        return null;
-      const salt = view.slice(2, 2 + this.saltLength);
-      const iv = view.slice(2 + this.saltLength, 2 + this.saltLength + this.ivLength);
-      const ciphertext = view.slice(2 + this.saltLength + this.ivLength);
-      const key = await this.deriveKey(salt);
-      const decrypted = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv, tagLength: this.tagLength * 8 },
-        key,
-        ciphertext
-      );
-      return decrypted;
-    } catch (e) {
-      return null;
-    }
-  }
-  static async hashFile(data) {
-    const hash = await crypto.subtle.digest("SHA-256", data);
-    const hex = Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
-    return hex;
-  }
-  isEnabled() {
-    return this.password.length > 0;
   }
 };
 
@@ -2390,7 +2497,7 @@ var SyncStatusBar = class {
 };
 
 // src/ui/SettingsTab.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/utils/pkce.ts
 function generateCodeVerifier() {
@@ -2424,7 +2531,7 @@ var PROVIDER_ICONS = {
   googledrive: "data:image/png;base64,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",
   onedrive: "data:image/png;base64,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"
 };
-var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
+var SyncSaveSettingsTab = class extends import_obsidian6.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2614,7 +2721,7 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
         this.plugin.settings.s3.secretAccessKey = "";
         this.plugin.settings.s3.accountName = "";
         this.plugin.saveSettings();
-        new import_obsidian7.Notice("\u5DF2\u6E05\u9664 S3 \u91D1\u9470\u9023\u7D50");
+        new import_obsidian6.Notice("\u5DF2\u6E05\u9664 S3 \u91D1\u9470\u9023\u7D50");
         this.display();
       });
     }
@@ -2741,7 +2848,7 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
             s.path = "SyncSaveObsidian";
           }
           this.plugin.saveSettings();
-          new import_obsidian7.Notice("\u5DF2\u522A\u9664 WebDAV \u5E33\u865F");
+          new import_obsidian6.Notice("\u5DF2\u522A\u9664 WebDAV \u5E33\u865F");
           this.display();
         });
       }
@@ -2779,7 +2886,7 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
         this.plugin.settings.dropbox.refreshToken = "";
         this.plugin.settings.dropbox.accountName = "";
         this.plugin.saveSettings();
-        new import_obsidian7.Notice("\u5DF2\u4E2D\u65B7 Dropbox \u9023\u7D50");
+        new import_obsidian6.Notice("\u5DF2\u4E2D\u65B7 Dropbox \u9023\u7D50");
         this.display();
       });
     }
@@ -2818,13 +2925,13 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
       } catch (e) {
       }
       if (!finalCode) {
-        new import_obsidian7.Notice("\u8ACB\u5148\u8F38\u5165\u6388\u6B0A\u78BC");
+        new import_obsidian6.Notice("\u8ACB\u5148\u8F38\u5165\u6388\u6B0A\u78BC");
         return;
       }
       const provider = this.plugin.getProvider("dropbox");
       if (provider && provider.name === "Dropbox") {
         const res = await provider.authorizeWithCode(finalCode, s.codeVerifier);
-        new import_obsidian7.Notice(res.message);
+        new import_obsidian6.Notice(res.message);
         if (res.success) {
           this.plugin.settings.dropbox.codeVerifier = "";
           this.plugin.saveSettings();
@@ -2879,7 +2986,7 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
         this.plugin.settings.onedrive.refreshToken = "";
         this.plugin.settings.onedrive.accountName = "";
         this.plugin.saveSettings();
-        new import_obsidian7.Notice("\u5DF2\u4E2D\u65B7 OneDrive \u9023\u7D50");
+        new import_obsidian6.Notice("\u5DF2\u4E2D\u65B7 OneDrive \u9023\u7D50");
         this.display();
       });
     }
@@ -2918,13 +3025,13 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
       } catch (e) {
       }
       if (!finalCode) {
-        new import_obsidian7.Notice("\u8ACB\u5148\u8F38\u5165\u6388\u6B0A\u78BC");
+        new import_obsidian6.Notice("\u8ACB\u5148\u8F38\u5165\u6388\u6B0A\u78BC");
         return;
       }
       const provider = this.plugin.getProvider("onedrive");
       if (provider && provider.name === "OneDrive") {
         const res = await provider.authorizeWithCode(finalCode, s.codeVerifier);
-        new import_obsidian7.Notice(res.message);
+        new import_obsidian6.Notice(res.message);
         if (res.success) {
           this.plugin.settings.onedrive.codeVerifier = "";
           this.plugin.saveSettings();
@@ -2981,7 +3088,7 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
         this.plugin.settings.googledrive.refreshToken = "";
         this.plugin.settings.googledrive.accountName = "";
         this.plugin.saveSettings();
-        new import_obsidian7.Notice("\u5DF2\u4E2D\u65B7 Google Drive \u9023\u7D50");
+        new import_obsidian6.Notice("\u5DF2\u4E2D\u65B7 Google Drive \u9023\u7D50");
         this.display();
       });
     }
@@ -3020,13 +3127,13 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
       } catch (e) {
       }
       if (!finalCode) {
-        new import_obsidian7.Notice("\u8ACB\u5148\u8F38\u5165\u6388\u6B0A\u78BC");
+        new import_obsidian6.Notice("\u8ACB\u5148\u8F38\u5165\u6388\u6B0A\u78BC");
         return;
       }
       const provider = this.plugin.getProvider();
       if (provider && provider.name === "Google Drive") {
         const res = await provider.authorizeWithCode(finalCode, s.codeVerifier);
-        new import_obsidian7.Notice(res.message);
+        new import_obsidian6.Notice(res.message);
         if (res.success) {
           this.plugin.settings.googledrive.codeVerifier = "";
           this.plugin.saveSettings();
@@ -3077,7 +3184,7 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
         this.plugin.settings.box.refreshToken = "";
         this.plugin.settings.box.accountName = "";
         this.plugin.saveSettings();
-        new import_obsidian7.Notice("\u5DF2\u4E2D\u65B7 Box \u9023\u7D50");
+        new import_obsidian6.Notice("\u5DF2\u4E2D\u65B7 Box \u9023\u7D50");
         this.display();
       });
     }
@@ -3128,10 +3235,11 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
     modeSetting.createDiv({ cls: "sync-form-label", text: "\u540C\u6B65\u6A21\u5F0F (Sync Mode)" });
     const modeSelect = modeSetting.createEl("select", { cls: "sync-input" });
     const modes = [
-      { value: "bidirectional", label: "\u96D9\u5411\u540C\u6B65 (Bidirectional Sync)" },
-      { value: "upload-only", label: "\u55AE\u5411\u5099\u4EFD (Upload Only / Backup)" },
-      { value: "download-only", label: "\u55AE\u5411\u56DE\u5FA9 (Download Only / Restore)" },
-      { value: "sync-delete", label: "\u5099\u4EFD\u4E26\u540C\u6B65\u522A\u9664 (Backup & Sync Delete)" }
+      { value: "bidirectional", label: "\u96D9\u5411\u540C\u6B65\uFF08\u9810\u8A2D\uFF09" },
+      { value: "upload-only", label: "\u589E\u91CF\u63A8\u9001" },
+      { value: "download-only", label: "\u589E\u91CF\u62C9\u53D6" },
+      { value: "upload-delete", label: "\u589E\u91CF\u63A8\u9001\u5E36\u522A\u9664" },
+      { value: "download-delete", label: "\u589E\u91CF\u62C9\u53D6\u5E36\u522A\u9664" }
     ];
     for (const m of modes) {
       const opt = modeSelect.createEl("option", { value: m.value, text: m.label });
@@ -3145,8 +3253,10 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
         modeDesc.setText("\u{1F4A1} \u55AE\u5411\u5099\u4EFD\uFF1A\u5C07\u672C\u6A5F\u7684\u65B0\u589E\u6216\u4FEE\u6539\u55AE\u5411\u540C\u6B65\u4E0A\u50B3\u5230\u96F2\u7AEF\uFF0C\u4E0D\u4E0B\u8F09\u96F2\u7AEF\u7684\u8B8A\u66F4\u3002\u9069\u5408\u505A\u70BA\u96F2\u7AEF\u5099\u4EFD\u5EAB\u4F7F\u7528\u3002");
       } else if (val === "download-only") {
         modeDesc.setText("\u{1F4A1} \u55AE\u5411\u56DE\u5FA9\uFF1A\u5C07\u96F2\u7AEF\u6A94\u6848\u55AE\u5411\u540C\u6B65\u4E0B\u8F09\u4E26\u8986\u84CB\u81F3\u672C\u6A5F\uFF0C\u4E0D\u767C\u9001\u672C\u6A5F\u7684\u4EFB\u4F55\u4FEE\u6539\u3002\u9069\u5408\u5728\u5168\u65B0\u88DD\u7F6E\u4E0A\u9032\u884C\u521D\u59CB\u9084\u539F\u3002");
-      } else if (val === "sync-delete") {
-        modeDesc.setText("\u{1F4A1} \u5099\u4EFD\u4E26\u540C\u6B65\u522A\u9664\uFF1A\u4E0A\u50B3\u672C\u6A5F\u65B0\u589E/\u4FEE\u6539\u3001\u4E0B\u8F09\u96F2\u7AEF\u8B8A\u66F4\uFF0C\u4E26\u5C07\u672C\u6A5F\u5DF2\u522A\u9664\u7684\u6A94\u6848\u79FB\u5230\u96F2\u7AEF\u5783\u573E\u6876\uFF08\u975E\u771F\u522A\u9664\uFF09\u3002\u9069\u5408\u7DAD\u6301\u672C\u6A5F\u8207\u96F2\u7AEF\u93E1\u50CF\u4E00\u81F4\u3002");
+      } else if (val === "upload-delete") {
+        modeDesc.setText("\u{1F4A1} \u589E\u91CF\u63A8\u9001\u5E36\u522A\u9664\uFF1A\u5C07\u672C\u6A5F\u65B0\u589E\u6216\u4FEE\u6539\u63A8\u9001\u5230\u96F2\u7AEF\uFF0C\u4E26\u628A\u672C\u6A5F\u5DF2\u522A\u9664\u7684\u9060\u7AEF\u6A94\u6848\u79FB\u5165\u96F2\u7AEF\u5783\u573E\u6876\u3002\u9069\u5408\u4EE5\u672C\u6A5F\u70BA\u6E96\u7684\u93E1\u50CF\u540C\u6B65\u3002");
+      } else if (val === "download-delete") {
+        modeDesc.setText("\u{1F4A1} \u589E\u91CF\u62C9\u53D6\u5E36\u522A\u9664\uFF1A\u5C07\u96F2\u7AEF\u65B0\u589E\u6216\u4FEE\u6539\u62C9\u53D6\u5230\u672C\u6A5F\uFF0C\u4E26\u628A\u96F2\u7AEF\u5DF2\u522A\u9664\u7684\u672C\u6A5F\u6A94\u6848\u79FB\u5165\u9078\u5B9A\u7684\u672C\u6A5F\u5783\u573E\u6876\u3002\u9069\u5408\u4EE5\u96F2\u7AEF\u70BA\u6E96\u7684\u93E1\u50CF\u540C\u6B65\u3002");
       } else {
         modeDesc.setText("\u{1F4A1} \u96D9\u5411\u540C\u6B65\uFF1A\u81EA\u52D5\u6BD4\u5C0D\u672C\u6A5F\u8207\u96F2\u7AEF\u7684\u6700\u65B0\u7570\u52D5\uFF0C\u5C07\u5169\u7AEF\u6A94\u6848\u540C\u6B65\u81F3\u6700\u65B0\u72C0\u614B\u3002\u82E5\u767C\u751F\u885D\u7A81\u5247\u5957\u7528\u4E0B\u65B9\u7684\u885D\u7A81\u8655\u7406\u7B56\u7565\u3002");
       }
@@ -3157,6 +3267,49 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
       updateDesc(modeSelect.value);
       this.plugin.saveSettings();
     });
+    const remoteDeleteNote = card.createDiv({
+      cls: "sync-toggle-desc",
+      text: "\u9060\u7AEF\u522A\u9664\u4E00\u5F8B\u5148\u79FB\u81F3 .sync-trash/\uFF0C\u4E0D\u6703\u76F4\u63A5\u6C38\u4E45\u522A\u9664\u3002"
+    });
+    remoteDeleteNote.style.cssText = "font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 8px;";
+    const localDeleteSetting = card.createDiv({ cls: "sync-form-group" });
+    localDeleteSetting.createDiv({ cls: "sync-form-label", text: "\u672C\u6A5F\u522A\u9664\u76EE\u7684\u5730" });
+    const localDeleteSelect = localDeleteSetting.createEl("select", { cls: "sync-input" });
+    for (const destination of [
+      { value: "system-trash", label: "\u7CFB\u7D71\u5783\u573E\u6876" },
+      { value: "obsidian-trash", label: "Obsidian \u5783\u573E\u6876" }
+    ]) {
+      const option = localDeleteSelect.createEl("option", { value: destination.value, text: destination.label });
+      if (destination.value === this.plugin.settings.localDeleteDestination)
+        option.selected = true;
+    }
+    localDeleteSelect.addEventListener("change", () => {
+      this.plugin.settings.localDeleteDestination = localDeleteSelect.value;
+      this.plugin.saveSettings();
+    });
+    const thresholdSetting = card.createDiv({ cls: "sync-form-group" });
+    thresholdSetting.createDiv({ cls: "sync-form-label", text: "\u5927\u91CF\u8B8A\u66F4\u4FDD\u8B77\u9580\u6ABB\uFF08%\uFF09" });
+    const thresholdInput = thresholdSetting.createEl("input", {
+      cls: "sync-input",
+      type: "number",
+      value: String(this.plugin.settings.largeChangeThreshold),
+      attr: { min: "0", max: "100", step: "1" }
+    });
+    thresholdSetting.createDiv({
+      cls: "sync-toggle-desc",
+      text: "\u9810\u8A2D 50\uFF1B0 = \u95DC\u9589\u4FDD\u8B77\uFF1B100 = \u4E0D\u9650\u5236\u3002\u7D14\u65B0\u589E\u6A94\u6848\u4E0D\u8A08\u5165\u3002"
+    });
+    thresholdInput.addEventListener("change", () => {
+      const value = Number(thresholdInput.value);
+      this.plugin.settings.largeChangeThreshold = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 50;
+      thresholdInput.value = String(this.plugin.settings.largeChangeThreshold);
+      this.plugin.saveSettings();
+    });
+    const updateDeleteDestinationVisibility = (mode) => {
+      localDeleteSetting.style.display = mode === "download-delete" ? "" : "none";
+    };
+    updateDeleteDestinationVisibility(this.plugin.settings.syncMode || "bidirectional");
+    modeSelect.addEventListener("change", () => updateDeleteDestinationVisibility(modeSelect.value));
     const divider5 = card.createDiv({ cls: "sync-settings-divider" });
     const conflictSetting = card.createDiv({ cls: "sync-form-group" });
     const conflictLabel = conflictSetting.createDiv({ cls: "sync-form-label", text: "\u885D\u7A81\u8655\u7406\u7B56\u7565" });
@@ -3175,6 +3328,11 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
       this.plugin.settings.conflictStrategy = conflictSelect.value;
       this.plugin.saveSettings();
     });
+    const conflictCopyButton = card.createEl("button", {
+      cls: "sync-btn sync-btn-secondary",
+      text: "\u6383\u63CF\u885D\u7A81\u526F\u672C"
+    });
+    conflictCopyButton.addEventListener("click", () => this.plugin.scanConflictCopies());
   }
   renderRemoteBaseDirSettings() {
     const { containerEl } = this;
@@ -3208,7 +3366,7 @@ var SyncSaveSettingsTab = class extends import_obsidian7.PluginSettingTab {
       const value = input.value.trim();
       this.plugin.settings.remoteBaseDir = value;
       await this.plugin.saveSettings();
-      new import_obsidian7.Notice(`\u9060\u7AEF\u57FA\u6E96\u8CC7\u6599\u593E\u5DF2\u66F4\u65B0\u70BA\uFF1A${value || "SyncSaveObsidian"}`);
+      new import_obsidian6.Notice(`\u9060\u7AEF\u57FA\u6E96\u8CC7\u6599\u593E\u5DF2\u66F4\u65B0\u70BA\uFF1A${value || "SyncSaveObsidian"}`);
       this.display();
     });
   }
@@ -3363,17 +3521,20 @@ var DEFAULT_SETTINGS = {
   syncConfig: false,
   conflictStrategy: "keep-newer",
   syncMode: "bidirectional",
+  localDeleteDestination: "system-trash",
+  largeChangeThreshold: 50,
   trashRetentionDays: 30,
   trashCleanupIntervalHours: 24,
   showLastSyncInStatusBar: true,
   lastSuccessSyncTime: 0,
   remoteBaseDir: ""
 };
-var SyncSavePlugin = class extends import_obsidian8.Plugin {
+var SyncSavePlugin = class extends import_obsidian7.Plugin {
   constructor() {
     super(...arguments);
     this.syncLog = [];
     this.isCurrentlySyncing = false;
+    this.pendingConflictCopyPaths = null;
     this.trashCleanupTimer = null;
   }
   async onload() {
@@ -3404,7 +3565,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
     });
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        if (this.settings.syncOnSave && file instanceof import_obsidian8.TFile) {
+        if (this.settings.syncOnSave && file instanceof import_obsidian7.TFile) {
           this.manualSync();
         }
       })
@@ -3419,7 +3580,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
           this.settings.box.clientId = "";
           this.settings.box.clientSecret = "";
           await this.saveSettings();
-          new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1ABox \u96F2\u7AEF\u4E00\u9375\u6388\u6B0A\u6210\u529F\uFF01");
+          new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1ABox \u96F2\u7AEF\u4E00\u9375\u6388\u6B0A\u6210\u529F\uFF01");
           const boxProv = this.getProvider("box");
           if (boxProv) {
             const res = await boxProv.testConnection();
@@ -3433,7 +3594,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
             setting.activeTab.display();
           }
         } else {
-          new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1ABox \u4E00\u9375\u6388\u6B0A\u5931\u6557\uFF0C\u672A\u53D6\u5F97\u91D1\u9470");
+          new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1ABox \u4E00\u9375\u6388\u6B0A\u5931\u6557\uFF0C\u672A\u53D6\u5F97\u91D1\u9470");
         }
       }
       if (state === "dropbox" || provider === "dropbox") {
@@ -3442,7 +3603,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
           const providerInstance = this.getProvider("dropbox");
           if (providerInstance && providerInstance.name === "Dropbox") {
             const res = await providerInstance.authorizeWithCode(finalCode, this.settings.dropbox.codeVerifier);
-            new import_obsidian8.Notice(res.message);
+            new import_obsidian7.Notice(res.message);
             if (res.success) {
               this.settings.dropbox.codeVerifier = "";
               await this.saveSettings();
@@ -3465,7 +3626,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
           const providerInstance = this.getProvider("onedrive");
           if (providerInstance && providerInstance.name === "OneDrive") {
             const res = await providerInstance.authorizeWithCode(finalCode, this.settings.onedrive.codeVerifier);
-            new import_obsidian8.Notice(res.message);
+            new import_obsidian7.Notice(res.message);
             if (res.success) {
               this.settings.onedrive.codeVerifier = "";
               await this.saveSettings();
@@ -3489,7 +3650,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
       const finalCode = params.code;
       if (!finalCode) {
         console.error("[SyncSave] No code in callback params");
-        new import_obsidian8.Notice("OneDrive \u6388\u6B0A\u5931\u6557\uFF1A\u672A\u6536\u5230\u6388\u6B0A\u78BC");
+        new import_obsidian7.Notice("OneDrive \u6388\u6B0A\u5931\u6557\uFF1A\u672A\u6536\u5230\u6388\u6B0A\u78BC");
         return;
       }
       const providerInstance = this.getProvider("onedrive");
@@ -3500,7 +3661,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
       console.log("[SyncSave] codeVerifier:", ((_a = this.settings.onedrive.codeVerifier) == null ? void 0 : _a.substring(0, 10)) + "...");
       const res = await providerInstance.authorizeWithCode(finalCode, this.settings.onedrive.codeVerifier);
       console.log("[SyncSave] authorizeWithCode result:", res);
-      new import_obsidian8.Notice(res.message);
+      new import_obsidian7.Notice(res.message);
       if (res.success) {
         this.settings.onedrive.codeVerifier = "";
         await this.saveSettings();
@@ -3564,12 +3725,12 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
   }
   async manualSync() {
     if (this.isCurrentlySyncing) {
-      new import_obsidian8.Notice("\u540C\u6B65\u76EE\u524D\u6B63\u5728\u9032\u884C\u4E2D\uFF0C\u8ACB\u7A0D\u5019...");
+      new import_obsidian7.Notice("\u540C\u6B65\u76EE\u524D\u6B63\u5728\u9032\u884C\u4E2D\uFF0C\u8ACB\u7A0D\u5019...");
       return;
     }
     const enabled = this.settings.enabledProviders;
     if (!enabled || enabled.length === 0) {
-      new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5C1A\u672A\u555F\u7528\u4EFB\u4F55\u96F2\u7AEF\u670D\u52D9");
+      new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5C1A\u672A\u555F\u7528\u4EFB\u4F55\u96F2\u7AEF\u670D\u52D9");
       return;
     }
     this.isCurrentlySyncing = true;
@@ -3590,6 +3751,8 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
           conflictStrategy: this.settings.conflictStrategy,
           syncConfig: this.settings.syncConfig,
           syncMode: this.settings.syncMode,
+          localDeleteDestination: this.settings.localDeleteDestination,
+          largeChangeThreshold: this.settings.largeChangeThreshold,
           trashRetentionDays: this.settings.trashRetentionDays
         });
         syncService.on((event) => {
@@ -3612,14 +3775,14 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
   async testConnection() {
     const provider = this.getProvider();
     if (!provider) {
-      new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5C1A\u672A\u9078\u64C7\u96F2\u7AEF\u670D\u52D9");
+      new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5C1A\u672A\u9078\u64C7\u96F2\u7AEF\u670D\u52D9");
       return;
     }
     this.syncStatusBar.setSyncing();
     const result = await provider.testConnection();
     if (result.success) {
       this.syncStatusBar.setSuccess("\u5DF2\u9023\u7DDA");
-      new import_obsidian8.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A${result.message}`);
+      new import_obsidian7.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A${result.message}`);
       const active = this.settings.activeProvider;
       if (active) {
         const cleanMsg = result.message.replace("Connected as ", "").replace("\u5DF2\u9023\u7DDA\u70BA ", "").replace("Connected to ", "");
@@ -3632,7 +3795,7 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
       }
     } else {
       this.syncStatusBar.setError("\u9023\u7DDA\u5931\u6557");
-      new import_obsidian8.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A${result.message}`);
+      new import_obsidian7.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A${result.message}`);
     }
     this.log(`\u9023\u7DDA\u6E2C\u8A66\uFF1A${result.message}`);
   }
@@ -3647,12 +3810,12 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
   }
   async cleanupTrashNow() {
     if (this.isCurrentlySyncing) {
-      new import_obsidian8.Notice("\u540C\u6B65\u6B63\u5728\u9032\u884C\u4E2D\uFF0C\u8ACB\u7A0D\u5F8C\u518D\u8A66");
+      new import_obsidian7.Notice("\u540C\u6B65\u6B63\u5728\u9032\u884C\u4E2D\uFF0C\u8ACB\u7A0D\u5F8C\u518D\u8A66");
       return;
     }
     const enabled = this.settings.enabledProviders;
     if (!enabled || enabled.length === 0) {
-      new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5C1A\u672A\u555F\u7528\u4EFB\u4F55\u96F2\u7AEF\u670D\u52D9");
+      new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5C1A\u672A\u555F\u7528\u4EFB\u4F55\u96F2\u7AEF\u670D\u52D9");
       return;
     }
     this.isCurrentlySyncing = true;
@@ -3673,6 +3836,8 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
           conflictStrategy: this.settings.conflictStrategy,
           syncConfig: this.settings.syncConfig,
           syncMode: this.settings.syncMode,
+          localDeleteDestination: this.settings.localDeleteDestination,
+          largeChangeThreshold: this.settings.largeChangeThreshold,
           trashRetentionDays: this.settings.trashRetentionDays
         });
         syncService.on((event) => {
@@ -3686,12 +3851,68 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
         this.log(`\u958B\u59CB\u6E05\u9664\u96F2\u7AEF\u5783\u573E\u6876\uFF1A${providerId.toUpperCase()}`);
         await syncService.cleanupTrash();
       }
-      new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5783\u573E\u6876\u6E05\u9664\u5B8C\u6210");
+      new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5783\u573E\u6876\u6E05\u9664\u5B8C\u6210");
     } catch (e) {
       this.log(`\u6E05\u9664\u5783\u573E\u6876\u767C\u751F\u975E\u9810\u671F\u932F\u8AA4: ${e}`);
     } finally {
       this.isCurrentlySyncing = false;
     }
+  }
+  async scanConflictCopies() {
+    const paths = await SyncService.findConflictCopies(this.app.vault);
+    this.pendingConflictCopyPaths = paths;
+    if (paths.length === 0) {
+      new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u6C92\u6709\u627E\u5230\u885D\u7A81\u526F\u672C");
+      return;
+    }
+    const scanModal = new import_obsidian7.Modal(this.app);
+    scanModal.titleEl.setText(`\u627E\u5230 ${paths.length} \u500B\u885D\u7A81\u526F\u672C`);
+    const list = scanModal.contentEl.createEl("ul");
+    for (const path of paths)
+      list.createEl("li", { text: path });
+    const confirmButton = scanModal.contentEl.createEl("button", {
+      cls: "mod-cta",
+      text: "\u522A\u9664\u5217\u51FA\u7684\u885D\u7A81\u526F\u672C"
+    });
+    confirmButton.addEventListener("click", () => {
+      scanModal.close();
+      this.confirmConflictCopyDeletion(paths);
+    });
+    scanModal.open();
+  }
+  confirmConflictCopyDeletion(paths) {
+    const confirmationModal = new import_obsidian7.Modal(this.app);
+    confirmationModal.titleEl.setText("\u78BA\u8A8D\u522A\u9664\u885D\u7A81\u526F\u672C");
+    confirmationModal.contentEl.createEl("p", {
+      text: `\u5C07\u522A\u9664\u4E0B\u5217 ${paths.length} \u500B\u6A94\u6848\u5230\u672C\u6A5F\u5783\u573E\u6876\u3002\u6B64\u6E05\u55AE\u5FC5\u9808\u8207\u525B\u624D\u7684\u6383\u63CF\u7D50\u679C\u4E00\u81F4\u3002`
+    });
+    const confirmButton = confirmationModal.contentEl.createEl("button", {
+      cls: "mod-warning",
+      text: "\u78BA\u8A8D\u522A\u9664"
+    });
+    confirmButton.addEventListener("click", async () => {
+      try {
+        await this.deleteScannedConflictCopies(paths);
+        confirmationModal.close();
+        new import_obsidian7.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A\u5DF2\u5C07 ${paths.length} \u500B\u885D\u7A81\u526F\u672C\u79FB\u81F3\u5783\u573E\u6876`);
+      } catch (error) {
+        new import_obsidian7.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A\u7121\u6CD5\u522A\u9664\u885D\u7A81\u526F\u672C\uFF08${error instanceof Error ? error.message : String(error)}\uFF09`);
+      }
+    });
+    confirmationModal.open();
+  }
+  async deleteScannedConflictCopies(paths) {
+    if (!this.pendingConflictCopyPaths || paths.length !== this.pendingConflictCopyPaths.length || paths.some((path, index) => path !== this.pendingConflictCopyPaths[index])) {
+      throw new Error("conflict copies must match the immediately preceding scan");
+    }
+    for (const path of paths) {
+      if (this.settings.localDeleteDestination === "obsidian-trash") {
+        await this.app.vault.adapter.trashLocal(path);
+      } else {
+        await this.app.vault.adapter.trashSystem(path);
+      }
+    }
+    this.pendingConflictCopyPaths = null;
   }
   restartTrashCleanupTimer() {
     if (this.trashCleanupTimer !== null) {
@@ -3724,13 +3945,13 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
         this.saveSettings();
         this.syncStatusBar.setSuccess("\u540C\u6B65\u5B8C\u6210");
         this.ribbonIcon.removeClass("syncing");
-        new import_obsidian8.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u540C\u6B65\u5B8C\u6210");
+        new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u540C\u6B65\u5B8C\u6210");
         this.log("\u540C\u6B65\u6210\u529F\u5B8C\u6210");
         break;
       case "sync-error":
         this.syncStatusBar.setError("\u932F\u8AA4");
         this.ribbonIcon.removeClass("syncing");
-        new import_obsidian8.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A${event.message}`);
+        new import_obsidian7.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A${event.message}`);
         this.log(event.message);
         break;
     }
@@ -3776,6 +3997,9 @@ var SyncSavePlugin = class extends import_obsidian8.Plugin {
       if (acct.path === "SyncSave") {
         acct.path = "SyncSaveObsidian";
       }
+    }
+    if (this.settings.syncMode === "sync-delete") {
+      this.settings.syncMode = "upload-delete";
     }
     if (!this.settings.box.clientId && !this.settings.box.clientSecret) {
       this.settings.box.authType = "one_click";

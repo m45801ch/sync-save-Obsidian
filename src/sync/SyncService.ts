@@ -200,10 +200,14 @@ export class SyncService {
     });
   }
 
-  async findConflictCopies(): Promise<string[]> {
-    return this.vault.getFiles()
+  static async findConflictCopies(vault: Vault): Promise<string[]> {
+    return vault.getFiles()
       .map((file) => file.path)
       .filter((path) => CONFLICT_COPY_PATTERN.test(path));
+  }
+
+  async findConflictCopies(): Promise<string[]> {
+    return SyncService.findConflictCopies(this.vault);
   }
 
   async executePlan(plan: SyncPlan): Promise<void> {
