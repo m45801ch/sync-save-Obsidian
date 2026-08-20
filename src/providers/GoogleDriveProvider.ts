@@ -13,6 +13,67 @@ interface GoogleDriveConfig {
   codeVerifier?: string;
 }
 
+export function encodeGoogleDriveRequest(body?: unknown, fileContent?: ArrayBuffer): {
+  body?: string | ArrayBuffer;
+  contentType?: string;
+} {
+  if (body instanceof ArrayBuffer && !fileContent) {
+    return { body, contentType: "application/octet-stream" };
+  }
+
+  if (fileContent !== undefined) {
+    const boundary = `boundary_sync_save_${Date.now()}`;
+    const encoder = new TextEncoder();
+    const parts = [
+      encoder.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(body || {})}\r\n`),
+      encoder.encode(`--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`),
+      new Uint8Array(fileContent),
+      encoder.encode(`\r\n--${boundary}--\r\n`),
+    ];
+    const combined = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+    let offset = 0;
+    for (const part of parts) {
+      combined.set(part, offset);
+      offset += part.length;
+    }
+    return { body: combined.buffer, contentType: `multipart/related; boundary=${boundary}` };
+  }
+
+  if (body !== undefined) {
+    return { body: JSON.stringify(body), contentType: "application/json" };
+  }
+
+  return {};
+}
+
+function joinGoogleDrivePath(parentPath: string, name: string): string {
+  return parentPath ? `${parentPath}/${name}` : name;
+}
+
+export function flattenGoogleDriveTree(
+  rootId: string,
+  pages: Array<{ parentId: string; files: Array<{ id: string; name: string; mimeType: string; modifiedTime: string; size?: string }> }>
+): Array<{ path: string; mtime: number; size: number }> {
+  const files: Array<{ path: string; mtime: number; size: number }> = [];
+  const folders = [{ id: rootId, path: "" }];
+
+  while (folders.length > 0) {
+    const folder = folders.shift()!;
+    for (const page of pages.filter((page) => page.parentId === folder.id)) {
+      for (const item of page.files) {
+        const path = joinGoogleDrivePath(folder.path, item.name);
+        if (item.mimeType === "application/vnd.google-apps.folder") {
+          folders.push({ id: item.id, path });
+        } else {
+          files.push({ path, mtime: Date.parse(item.modifiedTime), size: Number(item.size || 0) });
+        }
+      }
+    }
+  }
+
+  return files;
+}
+
 class RequestUrlResponseWrapper {
   constructor(private res: RequestUrlResponse) {}
   get ok() {
@@ -206,52 +267,43 @@ export class GoogleDriveProvider extends CloudProvider {
     if (!this.rootFolderId) return [];
 
     const allFiles: { path: string; mtime: number; size: number }[] = [];
-    const folders: Record<string, string> = { "": this.rootFolderId };
-    let pageToken: string | null = null;
+    const folders = [{ id: this.rootFolderId, path: "" }];
 
-    do {
-      let q = `'${this.rootFolderId}' in parents and trashed=false`;
-      let url = `${this.apiBase}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,modifiedTime,size,parents)&pageSize=1000`;
-      if (pageToken) url += `&pageToken=${pageToken}`;
+    while (folders.length > 0) {
+      const folder = folders.shift()!;
+      let pageToken: string | undefined;
 
-      const resp = await this.request("GET", url);
-      if (!resp.ok) throw new Error(`Google Drive list failed: ${resp.status}`);
+      do {
+        const q = `'${folder.id}' in parents and trashed=false`;
+        let url = `${this.apiBase}/files?q=${encodeURIComponent(q)}&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size)&pageSize=1000`;
+        if (pageToken) url += `&pageToken=${pageToken}`;
 
-      const data = await resp.json();
+        const resp = await this.request("GET", url);
+        if (!resp.ok) throw new Error(`Google Drive list failed: ${resp.status}`);
 
-      for (const item of data.files || []) {
-        if (item.mimeType === "application/vnd.google-apps.folder") {
-          const parentPath = this.getParentPath(item.parents, folders) || "";
-          folders[`${parentPath}/${item.name}`] = item.id;
-        } else {
-          const parentPath = this.getParentPath(item.parents, folders) || "";
-          allFiles.push({
-            path: `${parentPath}/${item.name}`.replace(/^\//, ""),
-            mtime: new Date(item.modifiedTime).getTime(),
-            size: parseInt(item.size || "0"),
-          });
+        const data = await resp.json();
+        for (const item of data.files || []) {
+          const path = joinGoogleDrivePath(folder.path, item.name);
+          if (item.mimeType === "application/vnd.google-apps.folder") {
+            folders.push({ id: item.id, path });
+          } else {
+            allFiles.push({
+              path,
+              mtime: Date.parse(item.modifiedTime),
+              size: Number(item.size || 0),
+            });
+          }
         }
-      }
 
-      pageToken = data.nextPageToken || null;
-    } while (pageToken);
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+    }
 
     return allFiles;
   }
 
-  private getParentPath(
-    parents: string[] | undefined,
-    folderMap: Record<string, string>
-  ): string | null {
-    if (!parents || parents.length === 0) return null;
-    for (const [path, id] of Object.entries(folderMap)) {
-      if (id === parents[0]) return path;
-    }
-    return null;
-  }
-
   async downloadFile(path: string): Promise<SyncFile> {
-    const fileId = await this.resolveFileId(path);
+    const fileId = await this.findFileId(path);
     if (!fileId) throw new Error(`File not found: ${path}`);
 
     const resp = await this.request(
@@ -281,16 +333,14 @@ export class GoogleDriveProvider extends CloudProvider {
   async uploadFile(path: string, content: ArrayBuffer, mtime: number): Promise<void> {
     if (!this.rootFolderId) throw new Error("Not connected");
 
-    const existingId = await this.resolveFileId(path);
-    const parentId = await this.ensureParentFolders(path);
+    const existingId = await this.findFileId(path);
     const fileName = path.split("/").pop() || path;
 
     if (existingId) {
       const resp = await this.request(
         "PATCH",
         `${this.uploadBase}/files/${existingId}?uploadType=media`,
-        content,
-        { "Content-Type": "application/octet-stream" }
+        content
       );
       if (!resp.ok) throw new Error(`Google Drive upload content failed: ${resp.status}`);
 
@@ -301,6 +351,7 @@ export class GoogleDriveProvider extends CloudProvider {
       );
       if (!metaResp.ok) throw new Error(`Google Drive update metadata failed: ${metaResp.status}`);
     } else {
+      const parentId = await this.ensureParentFolders(path);
       const metadata = {
         name: fileName,
         parents: [parentId],
@@ -322,7 +373,7 @@ export class GoogleDriveProvider extends CloudProvider {
   }
 
   async deleteFile(path: string): Promise<void> {
-    const fileId = await this.resolveFileId(path);
+    const fileId = await this.findFileId(path);
     if (!fileId) return;
 
     const resp = await this.request("DELETE", `${this.apiBase}/files/${fileId}`);
@@ -433,14 +484,26 @@ export class GoogleDriveProvider extends CloudProvider {
     return currentParentId;
   }
 
-  private async resolveFileId(path: string): Promise<string | null> {
+  private async findFileId(path: string): Promise<string | null> {
     if (!this.rootFolderId) return null;
 
     const parts = path.split("/");
     const fileName = parts.pop();
     if (!fileName) return null;
 
-    const parentId = await this.ensureParentFolders(path);
+    let parentId = this.rootFolderId;
+    for (const part of parts) {
+      const q = encodeURIComponent(
+        `name='${part.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
+      );
+      const resp = await this.request("GET", `${this.apiBase}/files?q=${q}&fields=files(id,name)`);
+      if (!resp.ok) return null;
+
+      const data = await resp.json();
+      const folderId = data.files?.[0]?.id;
+      if (!folderId) return null;
+      parentId = folderId;
+    }
 
     const q = encodeURIComponent(
       `name='${fileName.replace(/'/g, "\\'")}' and '${parentId}' in parents and trashed=false`
@@ -459,45 +522,18 @@ export class GoogleDriveProvider extends CloudProvider {
     extraHeaders?: Record<string, string>,
     fileContent?: ArrayBuffer
   ): Promise<Response> {
+    const encoded = encodeGoogleDriveRequest(body, fileContent);
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.accessToken || this.config.accessToken}`,
       ...extraHeaders,
+      ...(encoded.contentType ? { "Content-Type": encoded.contentType } : {}),
     };
-
-    let finalBody: string | ArrayBuffer | undefined;
-
-    if (fileContent) {
-      const boundary = `boundary_sync_save_${Date.now()}`;
-      const encoder = new TextEncoder();
-      const parts: Uint8Array[] = [];
-      
-      parts.push(encoder.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(body || {})}\r\n`));
-      parts.push(encoder.encode(`--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`));
-      parts.push(new Uint8Array(fileContent));
-      parts.push(encoder.encode(`\r\n--${boundary}--\r\n`));
-
-      let totalLength = 0;
-      for (const part of parts) {
-        totalLength += part.length;
-      }
-      const combined = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const part of parts) {
-        combined.set(part, offset);
-        offset += part.length;
-      }
-      finalBody = combined.buffer;
-      headers["Content-Type"] = `multipart/related; boundary=${boundary}`;
-    } else if (body) {
-      headers["Content-Type"] = "application/json";
-      finalBody = JSON.stringify(body);
-    }
 
     const response = await requestUrl({
       url,
       method,
       headers,
-      body: finalBody,
+      body: encoded.body,
       throw: false,
     });
 

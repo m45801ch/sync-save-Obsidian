@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginManifest, TFile } from "obsidian";
+import { App, Modal, Notice, Plugin, PluginManifest, TFile } from "obsidian";
 import { SyncService, SyncEvent } from "./src/sync/SyncService";
 import { S3Provider } from "./src/providers/S3Provider";
 import { WebDAVProvider } from "./src/providers/WebDAVProvider";
@@ -51,6 +51,8 @@ interface SyncSaveSettings {
   syncConfig: boolean;
   conflictStrategy: string;
   syncMode: string;
+  localDeleteDestination: "system-trash" | "obsidian-trash";
+  largeChangeThreshold: number;
   trashRetentionDays: number;
   trashCleanupIntervalHours: number;
   showLastSyncInStatusBar: boolean;
@@ -83,6 +85,8 @@ const DEFAULT_SETTINGS: SyncSaveSettings = {
   syncConfig: false,
   conflictStrategy: "keep-newer",
   syncMode: "bidirectional",
+  localDeleteDestination: "system-trash",
+  largeChangeThreshold: 50,
   trashRetentionDays: 30,
   trashCleanupIntervalHours: 24,
   showLastSyncInStatusBar: true,
@@ -314,6 +318,7 @@ export default class SyncSavePlugin extends Plugin {
   }
 
   private isCurrentlySyncing = false;
+  private pendingConflictCopyPaths: string[] | null = null;
 
   async manualSync(): Promise<void> {
     if (this.isCurrentlySyncing) {
@@ -347,6 +352,8 @@ export default class SyncSavePlugin extends Plugin {
           conflictStrategy: this.settings.conflictStrategy as any,
           syncConfig: this.settings.syncConfig,
           syncMode: this.settings.syncMode as any,
+          localDeleteDestination: this.settings.localDeleteDestination,
+          largeChangeThreshold: this.settings.largeChangeThreshold,
           trashRetentionDays: this.settings.trashRetentionDays,
         });
 
@@ -448,6 +455,8 @@ export default class SyncSavePlugin extends Plugin {
           conflictStrategy: this.settings.conflictStrategy as any,
           syncConfig: this.settings.syncConfig,
           syncMode: this.settings.syncMode as any,
+          localDeleteDestination: this.settings.localDeleteDestination,
+          largeChangeThreshold: this.settings.largeChangeThreshold,
           trashRetentionDays: this.settings.trashRetentionDays,
         });
 
@@ -469,6 +478,68 @@ export default class SyncSavePlugin extends Plugin {
     } finally {
       this.isCurrentlySyncing = false;
     }
+  }
+
+  async scanConflictCopies(): Promise<void> {
+    const paths = await SyncService.findConflictCopies(this.app.vault);
+    this.pendingConflictCopyPaths = paths;
+
+    if (paths.length === 0) {
+      new Notice("同步備份：沒有找到衝突副本");
+      return;
+    }
+
+    const scanModal = new Modal(this.app);
+    scanModal.titleEl.setText(`找到 ${paths.length} 個衝突副本`);
+    const list = scanModal.contentEl.createEl("ul");
+    for (const path of paths) list.createEl("li", { text: path });
+    const confirmButton = scanModal.contentEl.createEl("button", {
+      cls: "mod-cta",
+      text: "刪除列出的衝突副本",
+    });
+    confirmButton.addEventListener("click", () => {
+      scanModal.close();
+      this.confirmConflictCopyDeletion(paths);
+    });
+    scanModal.open();
+  }
+
+  private confirmConflictCopyDeletion(paths: string[]): void {
+    const confirmationModal = new Modal(this.app);
+    confirmationModal.titleEl.setText("確認刪除衝突副本");
+    confirmationModal.contentEl.createEl("p", {
+      text: `將刪除下列 ${paths.length} 個檔案到本機垃圾桶。此清單必須與剛才的掃描結果一致。`,
+    });
+    const confirmButton = confirmationModal.contentEl.createEl("button", {
+      cls: "mod-warning",
+      text: "確認刪除",
+    });
+    confirmButton.addEventListener("click", async () => {
+      try {
+        await this.deleteScannedConflictCopies(paths);
+        confirmationModal.close();
+        new Notice(`同步備份：已將 ${paths.length} 個衝突副本移至垃圾桶`);
+      } catch (error) {
+        new Notice(`同步備份：無法刪除衝突副本（${error instanceof Error ? error.message : String(error)}）`);
+      }
+    });
+    confirmationModal.open();
+  }
+
+  async deleteScannedConflictCopies(paths: string[]): Promise<void> {
+    if (!this.pendingConflictCopyPaths || paths.length !== this.pendingConflictCopyPaths.length ||
+      paths.some((path, index) => path !== this.pendingConflictCopyPaths![index])) {
+      throw new Error("conflict copies must match the immediately preceding scan");
+    }
+
+    for (const path of paths) {
+      if (this.settings.localDeleteDestination === "obsidian-trash") {
+        await this.app.vault.adapter.trashLocal(path);
+      } else {
+        await this.app.vault.adapter.trashSystem(path);
+      }
+    }
+    this.pendingConflictCopyPaths = null;
   }
 
   restartTrashCleanupTimer(): void {
@@ -566,6 +637,10 @@ export default class SyncSavePlugin extends Plugin {
       if (acct.path === "SyncSave") {
         acct.path = "SyncSaveObsidian";
       }
+    }
+
+    if (this.settings.syncMode === "sync-delete") {
+      this.settings.syncMode = "upload-delete";
     }
 
     // 遷移設定：如果沒有自訂 Box 金鑰，預設強制切換為「一鍵連結」

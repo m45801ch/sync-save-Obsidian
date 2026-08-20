@@ -851,10 +851,11 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     modeSetting.createDiv({ cls: "sync-form-label", text: "同步模式 (Sync Mode)" });
     const modeSelect = modeSetting.createEl("select", { cls: "sync-input" });
     const modes = [
-      { value: "bidirectional", label: "雙向同步 (Bidirectional Sync)" },
-      { value: "upload-only", label: "單向備份 (Upload Only / Backup)" },
-      { value: "download-only", label: "單向回復 (Download Only / Restore)" },
-      { value: "sync-delete", label: "備份並同步刪除 (Backup & Sync Delete)" },
+      { value: "bidirectional", label: "雙向同步（預設）" },
+      { value: "upload-only", label: "增量推送" },
+      { value: "download-only", label: "增量拉取" },
+      { value: "upload-delete", label: "增量推送帶刪除" },
+      { value: "download-delete", label: "增量拉取帶刪除" },
     ];
     for (const m of modes) {
       const opt = modeSelect.createEl("option", { value: m.value, text: m.label });
@@ -869,8 +870,10 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
         modeDesc.setText("💡 單向備份：將本機的新增或修改單向同步上傳到雲端，不下載雲端的變更。適合做為雲端備份庫使用。");
       } else if (val === "download-only") {
         modeDesc.setText("💡 單向回復：將雲端檔案單向同步下載並覆蓋至本機，不發送本機的任何修改。適合在全新裝置上進行初始還原。");
-      } else if (val === "sync-delete") {
-        modeDesc.setText("💡 備份並同步刪除：上傳本機新增/修改、下載雲端變更，並將本機已刪除的檔案移到雲端垃圾桶（非真刪除）。適合維持本機與雲端鏡像一致。");
+      } else if (val === "upload-delete") {
+        modeDesc.setText("💡 增量推送帶刪除：將本機新增或修改推送到雲端，並把本機已刪除的遠端檔案移入雲端垃圾桶。適合以本機為準的鏡像同步。");
+      } else if (val === "download-delete") {
+        modeDesc.setText("💡 增量拉取帶刪除：將雲端新增或修改拉取到本機，並把雲端已刪除的本機檔案移入選定的本機垃圾桶。適合以雲端為準的鏡像同步。");
       } else {
         modeDesc.setText("💡 雙向同步：自動比對本機與雲端的最新異動，將兩端檔案同步至最新狀態。若發生衝突則套用下方的衝突處理策略。");
       }
@@ -884,6 +887,52 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
       this.plugin.saveSettings();
     });
 
+    const remoteDeleteNote = card.createDiv({
+      cls: "sync-toggle-desc",
+      text: "遠端刪除一律先移至 .sync-trash/，不會直接永久刪除。",
+    });
+    remoteDeleteNote.style.cssText = "font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 8px;";
+
+    const localDeleteSetting = card.createDiv({ cls: "sync-form-group" });
+    localDeleteSetting.createDiv({ cls: "sync-form-label", text: "本機刪除目的地" });
+    const localDeleteSelect = localDeleteSetting.createEl("select", { cls: "sync-input" });
+    for (const destination of [
+      { value: "system-trash", label: "系統垃圾桶" },
+      { value: "obsidian-trash", label: "Obsidian 垃圾桶" },
+    ]) {
+      const option = localDeleteSelect.createEl("option", { value: destination.value, text: destination.label });
+      if (destination.value === this.plugin.settings.localDeleteDestination) option.selected = true;
+    }
+    localDeleteSelect.addEventListener("change", () => {
+      this.plugin.settings.localDeleteDestination = localDeleteSelect.value as "system-trash" | "obsidian-trash";
+      this.plugin.saveSettings();
+    });
+
+    const thresholdSetting = card.createDiv({ cls: "sync-form-group" });
+    thresholdSetting.createDiv({ cls: "sync-form-label", text: "大量變更保護門檻（%）" });
+    const thresholdInput = thresholdSetting.createEl("input", {
+      cls: "sync-input",
+      type: "number",
+      value: String(this.plugin.settings.largeChangeThreshold),
+      attr: { min: "0", max: "100", step: "1" },
+    });
+    thresholdSetting.createDiv({
+      cls: "sync-toggle-desc",
+      text: "預設 50；0 = 關閉保護；100 = 不限制。純新增檔案不計入。",
+    });
+    thresholdInput.addEventListener("change", () => {
+      const value = Number(thresholdInput.value);
+      this.plugin.settings.largeChangeThreshold = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 50;
+      thresholdInput.value = String(this.plugin.settings.largeChangeThreshold);
+      this.plugin.saveSettings();
+    });
+
+    const updateDeleteDestinationVisibility = (mode: string) => {
+      localDeleteSetting.style.display = mode === "download-delete" ? "" : "none";
+    };
+    updateDeleteDestinationVisibility(this.plugin.settings.syncMode || "bidirectional");
+    modeSelect.addEventListener("change", () => updateDeleteDestinationVisibility(modeSelect.value));
+
     const divider5 = card.createDiv({ cls: "sync-settings-divider" });
 
     const conflictSetting = card.createDiv({ cls: "sync-form-group" });
@@ -892,7 +941,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
     const strategies = [
       { value: "keep-newer", label: "保留較新檔案" },
       { value: "keep-larger", label: "保留較大檔案" },
-      { value: "smart", label: "智慧合併 (Smart Merge)" },
+      { value: "smart", label: "智慧衝突處理 (Smart Conflict)" },
     ];
     for (const strat of strategies) {
       const opt = conflictSelect.createEl("option", { value: strat.value, text: strat.label });
@@ -902,6 +951,12 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
       this.plugin.settings.conflictStrategy = conflictSelect.value;
       this.plugin.saveSettings();
     });
+
+    const conflictCopyButton = card.createEl("button", {
+      cls: "sync-btn sync-btn-secondary",
+      text: "掃描衝突副本",
+    });
+    conflictCopyButton.addEventListener("click", () => this.plugin.scanConflictCopies());
   }
 
   private renderRemoteBaseDirSettings(): void {

@@ -1,3 +1,5 @@
+import type { ManifestFileState } from "./SyncPlanner";
+
 export interface SyncFile {
   path: string;
   content: ArrayBuffer;
@@ -6,8 +8,8 @@ export interface SyncFile {
 }
 
 export interface SyncManifest {
-  version: number;
-  files: Record<string, { mtime: number; size: number; hash: string }>;
+  version: 2;
+  files: Record<string, ManifestFileState>;
   timestamp: number;
   vaultName: string;
 }
