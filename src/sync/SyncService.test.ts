@@ -176,9 +176,40 @@ describe("SyncService", () => {
     expect(provider.calls.filter((call) => call.startsWith("upload:") || call.startsWith("delete:"))).toEqual([]);
     expect(events.filter((event) => event.type === "sync-error")).toEqual([
       expect.objectContaining({
-        message: expect.stringContaining("2 destructive actions out of 2 comparable paths (100.0%)"),
+        message: expect.stringContaining("同步未執行"),
       }),
     ]);
+  });
+
+  it("reports the planned action count before blocking a large change", async () => {
+    const manifest = manifestFile(2, {
+      "a.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "a" },
+      "b.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "b" },
+    });
+    const vault = createVault({ "a.md": "a", "b.md": "b" });
+    const provider = createProvider({
+      listed: [{ path: manifest.path, mtime: manifest.mtime, size: manifest.size }],
+      downloaded: manifest,
+    });
+    const service = createService(vault, provider, {
+      syncMode: "download-delete",
+      largeChangeThreshold: 50,
+    });
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await service.sync();
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-progress",
+      message: expect.stringContaining("Planned 2 sync actions"),
+      progress: { current: 0, total: 2 },
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-error",
+      message: expect.stringContaining("因大量變更保護-同步未執行"),
+    }));
+    expect(events.some((event) => event.type === "sync-complete")).toBe(false);
   });
 
   it("finds only timestamped conflict copies", async () => {

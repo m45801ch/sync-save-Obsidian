@@ -108,6 +108,11 @@ export class SyncService {
       }
 
       const plan = await this.createPlan();
+      this.emit({
+        type: "sync-progress",
+        message: `Planned ${plan.actions.length} sync actions`,
+        progress: { current: 0, total: plan.actions.length },
+      });
       const percentage = plan.comparableExistingPathCount === 0
         ? 0
         : (plan.destructivePathCount / plan.comparableExistingPathCount) * 100;
@@ -120,15 +125,10 @@ export class SyncService {
         const actions = Object.entries(actionCounts).map(([type, count]) => `${type}=${count}`).join(", ");
         this.emit({
           type: "sync-error",
-          message: `Large change protection: ${plan.destructivePathCount} destructive actions out of ${plan.comparableExistingPathCount} comparable paths (${percentage.toFixed(1)}%). Actions: ${actions}`,
+          message: `因大量變更保護-同步未執行：已阻擋 ${plan.destructivePathCount} 個破壞性動作（${plan.comparableExistingPathCount} 個既有檔案中的 ${percentage.toFixed(1)}%）。動作：${actions}`,
         });
         return;
       }
-      this.emit({
-        type: "sync-progress",
-        message: `Planned ${plan.actions.length} sync actions`,
-        progress: { current: 0, total: plan.actions.length },
-      });
       await this.executePlan(plan);
 
       if (this.getSyncMode() === "upload-delete") await this.cleanupTrash();

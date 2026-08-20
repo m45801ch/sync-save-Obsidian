@@ -575,14 +575,14 @@ export default class SyncSavePlugin extends Plugin {
       case "sync-complete":
         this.settings.lastSuccessSyncTime = Date.now();
         this.saveSettings();
-        this.syncStatusBar.setSuccess("同步完成");
+        this.syncStatusBar.setSuccess(providerName ? `[${providerName}] 同步完成` : "同步完成");
         this.ribbonIcon.removeClass("syncing");
-        new Notice("同步備份：同步完成");
-        this.log("同步成功完成");
+        new Notice(`同步備份：${providerName ? `[${providerName}] ` : ""}同步完成`);
+        this.log(`${providerName ? `[${providerName}] ` : ""}同步成功完成`);
         break;
 
       case "sync-error":
-        this.syncStatusBar.setError("錯誤");
+        this.syncStatusBar.setError(providerName ? `[${providerName}] 錯誤` : "錯誤");
         this.ribbonIcon.removeClass("syncing");
         new Notice(`同步備份：${event.message}`);
         this.log(event.message);
