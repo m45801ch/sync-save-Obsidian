@@ -125,7 +125,7 @@ export class SyncService {
         const actions = Object.entries(actionCounts).map(([type, count]) => `${type}=${count}`).join(", ");
         this.emit({
           type: "sync-error",
-          message: `同步未執行：大量變更保護已阻擋 ${plan.destructivePathCount} 個破壞性動作（${plan.comparableExistingPathCount} 個既有檔案中的 ${percentage.toFixed(1)}%）。動作：${actions}`,
+          message: `因大量變更保護-同步未執行：已阻擋 ${plan.destructivePathCount} 個破壞性動作（${plan.comparableExistingPathCount} 個既有檔案中的 ${percentage.toFixed(1)}%）。動作：${actions}`,
         });
         return;
       }

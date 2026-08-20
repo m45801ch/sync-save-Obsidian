@@ -257,7 +257,7 @@ var SyncService = class {
         const actions = Object.entries(actionCounts).map(([type, count]) => `${type}=${count}`).join(", ");
         this.emit({
           type: "sync-error",
-          message: `\u540C\u6B65\u672A\u57F7\u884C\uFF1A\u5927\u91CF\u8B8A\u66F4\u4FDD\u8B77\u5DF2\u963B\u64CB ${plan.destructivePathCount} \u500B\u7834\u58DE\u6027\u52D5\u4F5C\uFF08${plan.comparableExistingPathCount} \u500B\u65E2\u6709\u6A94\u6848\u4E2D\u7684 ${percentage.toFixed(1)}%\uFF09\u3002\u52D5\u4F5C\uFF1A${actions}`
+          message: `\u56E0\u5927\u91CF\u8B8A\u66F4\u4FDD\u8B77-\u540C\u6B65\u672A\u57F7\u884C\uFF1A\u5DF2\u963B\u64CB ${plan.destructivePathCount} \u500B\u7834\u58DE\u6027\u52D5\u4F5C\uFF08${plan.comparableExistingPathCount} \u500B\u65E2\u6709\u6A94\u6848\u4E2D\u7684 ${percentage.toFixed(1)}%\uFF09\u3002\u52D5\u4F5C\uFF1A${actions}`
         });
         return;
       }

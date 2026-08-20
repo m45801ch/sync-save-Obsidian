@@ -207,7 +207,7 @@ describe("SyncService", () => {
     }));
     expect(events).toContainEqual(expect.objectContaining({
       type: "sync-error",
-      message: expect.stringContaining("同步未執行"),
+      message: expect.stringContaining("因大量變更保護-同步未執行"),
     }));
     expect(events.some((event) => event.type === "sync-complete")).toBe(false);
   });
