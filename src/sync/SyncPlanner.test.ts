@@ -40,6 +40,12 @@ describe("buildSyncPlan", () => {
     expect(plan("upload-delete", [], [file("constructor", 2, 1)]).actions).toEqual([]);
   });
 
+  it("does not count inherited object properties as comparable paths", () => {
+    expect(plan("upload-delete", [], [file("constructor", 2, 1)])).toMatchObject({
+      comparableExistingPathCount: 0,
+    });
+  });
+
   it("restores a missing side rather than deleting in bidirectional mode", () => {
     expect(plan("bidirectional", [], [file("a.md", 2, 1)], { "a.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "h" } }).actions)
       .toMatchObject([{ type: "download", path: "a.md" }]);

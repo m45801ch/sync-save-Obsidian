@@ -129,7 +129,9 @@ export function buildSyncPlan(input: {
   }
 
   const comparableExistingPaths = new Set(
-    [...paths].filter((path) => input.manifestFiles[path] || (localByPath.has(path) && remoteByPath.has(path))),
+    [...paths].filter((path) =>
+      Object.prototype.hasOwnProperty.call(input.manifestFiles, path) || (localByPath.has(path) && remoteByPath.has(path)),
+    ),
   );
   const destructivePaths = new Set(
     actions

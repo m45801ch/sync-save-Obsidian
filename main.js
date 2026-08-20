@@ -179,7 +179,9 @@ function buildSyncPlan(input) {
       resolveConflict(path, local, remote);
   }
   const comparableExistingPaths = new Set(
-    [...paths].filter((path) => input.manifestFiles[path] || localByPath.has(path) && remoteByPath.has(path))
+    [...paths].filter(
+      (path) => Object.prototype.hasOwnProperty.call(input.manifestFiles, path) || localByPath.has(path) && remoteByPath.has(path)
+    )
   );
   const destructivePaths = new Set(
     actions.filter(
@@ -3317,7 +3319,7 @@ var SyncSaveSettingsTab = class extends import_obsidian6.PluginSettingTab {
     const strategies = [
       { value: "keep-newer", label: "\u4FDD\u7559\u8F03\u65B0\u6A94\u6848" },
       { value: "keep-larger", label: "\u4FDD\u7559\u8F03\u5927\u6A94\u6848" },
-      { value: "smart", label: "\u667A\u6167\u5408\u4F75 (Smart Merge)" }
+      { value: "smart", label: "\u667A\u6167\u885D\u7A81\u8655\u7406 (Smart Conflict)" }
     ];
     for (const strat of strategies) {
       const opt = conflictSelect.createEl("option", { value: strat.value, text: strat.label });
