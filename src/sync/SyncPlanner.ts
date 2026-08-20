@@ -61,11 +61,12 @@ export function buildSyncPlan(input: {
   const localByPath = new Map(input.local.map((entry) => [entry.path, entry]));
   const remoteByPath = new Map(input.remote.map((entry) => [entry.path, entry]));
   const paths = new Set([...localByPath.keys(), ...remoteByPath.keys()]);
+  const conflictStrategy = input.conflictStrategy ?? "keep-newer";
   const actions: SyncAction[] = [];
   const add = (type: SyncActionType, path: string, reason: string, targetPath?: string, source?: "local" | "remote") =>
     actions.push({ type, path, reason, targetPath, source });
   const resolveConflict = (path: string, local: FileSnapshot, remote: FileSnapshot) => {
-    if (input.conflictStrategy === "smart") {
+    if (conflictStrategy === "smart") {
       const localIsNewer = local.mtime > remote.mtime;
       const remoteIsNewer = remote.mtime > local.mtime;
       if (localIsNewer || remoteIsNewer) {
@@ -75,14 +76,14 @@ export function buildSyncPlan(input: {
         return;
       }
     } else {
-      const localWins = input.conflictStrategy === "keep-newer"
+      const localWins = conflictStrategy === "keep-newer"
         ? local.mtime > remote.mtime || (local.mtime === remote.mtime && local.size > remote.size)
         : local.size > remote.size || (local.size === remote.size && local.mtime > remote.mtime);
-      const remoteWins = input.conflictStrategy === "keep-newer"
+      const remoteWins = conflictStrategy === "keep-newer"
         ? remote.mtime > local.mtime || (local.mtime === remote.mtime && remote.size > local.size)
         : remote.size > local.size || (local.size === remote.size && remote.mtime > local.mtime);
       if (localWins || remoteWins) {
-        add(localWins ? "upload" : "download", path, `${input.conflictStrategy} resolved conflict`);
+        add(localWins ? "upload" : "download", path, `${conflictStrategy} resolved conflict`);
         return;
       }
     }

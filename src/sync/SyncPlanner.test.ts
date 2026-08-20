@@ -49,6 +49,15 @@ describe("buildSyncPlan", () => {
     expect(actions).toMatchObject([{ type: "upload", path: "a.md" }]);
   });
 
+  it("defaults an omitted runtime strategy to keep-newer", () => {
+    const actions = buildSyncPlan({
+      local: [file("a.md", 9, 2, "local")], remote: [file("a.md", 5, 7, "remote")],
+      manifestFiles: { "a.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "base" } },
+      mode: "bidirectional", now: new Date("2026-08-20T00:00:00Z"),
+    } as any).actions;
+    expect(actions).toMatchObject([{ type: "upload", path: "a.md" }]);
+  });
+
   it("does not count pure creation as destructive", () => {
     const result = plan("upload-only", [file("new.md", 2, 1)], []);
     expect(result.destructivePathCount).toBe(0);
