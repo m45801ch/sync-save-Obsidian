@@ -133,11 +133,12 @@ export class SyncService {
 
   async createPlan(): Promise<SyncPlan> {
     const listedRemote = await this.provider.listFiles("");
+    const listedManifest = listedRemote.find((file) => file.path === MANIFEST_PATH);
     const remote = listedRemote.filter((file) =>
       file.path !== MANIFEST_PATH && !this.isTrashPath(file.path) && !this.shouldSkip(file.path),
     );
     const local = await this.getLocalFiles();
-    const manifest = await this.loadManifest();
+    const manifest = await this.loadManifest(listedManifest);
     const manifestFiles = manifest?.files ?? {};
     const localByPath = new Map(local.map((file) => [file.path, file]));
     const remoteByPath = new Map(remote.map((file) => [file.path, file]));
@@ -294,23 +295,33 @@ export class SyncService {
     return this.options.skipPaths.some((pattern) => path.match(pattern));
   }
 
-  private async loadManifest(): Promise<SyncManifest | null> {
+  private async loadManifest(listedManifest?: FileSnapshot): Promise<SyncManifest | null> {
+    if (!listedManifest) return null;
+
+    const raw = await this.downloadRemoteBodyVerified(MANIFEST_PATH, listedManifest.size);
+    const data = await this.decryptOrThrow(raw.content);
+    let parsed: any;
     try {
-      const raw = await this.provider.downloadFile(MANIFEST_PATH);
-      const data = await this.decryptOrThrow(raw.content);
-      const parsed = JSON.parse(new TextDecoder().decode(data));
-      if (parsed.version === 1) {
-        return {
-          version: 2,
-          files: {},
-          timestamp: parsed.timestamp,
-          vaultName: parsed.vaultName,
-        };
-      }
-      return parsed.version === 2 ? parsed as SyncManifest : null;
-    } catch {
-      return null;
+      parsed = JSON.parse(new TextDecoder().decode(data));
+    } catch (error) {
+      throw new Error(`invalid sync manifest: ${error instanceof Error ? error.message : String(error)}`);
     }
+
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("invalid sync manifest");
+    }
+    if (parsed.version === 1) {
+      return {
+        version: 2,
+        files: {},
+        timestamp: parsed.timestamp,
+        vaultName: parsed.vaultName,
+      };
+    }
+    if (parsed.version !== 2 || !parsed.files || typeof parsed.files !== "object" || Array.isArray(parsed.files)) {
+      throw new Error("invalid sync manifest");
+    }
+    return parsed as SyncManifest;
   }
 
   private async uploadContent(path: string, content: ArrayBuffer, mtime: number): Promise<void> {

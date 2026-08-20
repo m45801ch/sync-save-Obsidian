@@ -173,6 +173,185 @@ describe("SyncService", () => {
     expect(provider.calls).not.toContain("upload:.sync-manifest.json");
   });
 
+  it("does not make overwrite decisions when the manifest cannot be parsed", async () => {
+    const invalidManifest = {
+      path: ".sync-manifest.json",
+      mtime: 1,
+      size: 1,
+      content: encoder.encode("{").buffer,
+    };
+    const remote = { path: "a.md", mtime: 2, size: 3, content: encoder.encode("new").buffer };
+    const vault = createVault({ "a.md": "safe" });
+    const provider = createProvider({
+      listed: [
+        { path: invalidManifest.path, mtime: invalidManifest.mtime, size: invalidManifest.size },
+        { path: remote.path, mtime: remote.mtime, size: remote.size },
+      ],
+      downloaded: [invalidManifest, remote],
+    });
+    const service = createService(vault, provider);
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await expect(service.sync()).resolves.toBeUndefined();
+
+    expect(vault.readText("a.md")).toBe("safe");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-error",
+      message: expect.stringContaining("invalid sync manifest"),
+    }));
+    expect(provider.calls).not.toContain("upload:.sync-manifest.json");
+  });
+
+  it("does not make overwrite decisions when manifest size verification fails", async () => {
+    const invalidManifest = {
+      path: ".sync-manifest.json",
+      mtime: 1,
+      size: 2,
+      content: encoder.encode("{}").buffer,
+    };
+    const remote = { path: "a.md", mtime: 2, size: 3, content: encoder.encode("new").buffer };
+    const vault = createVault({ "a.md": "safe" });
+    const provider = createProvider({
+      listed: [
+        { path: invalidManifest.path, mtime: invalidManifest.mtime, size: 20 },
+        { path: remote.path, mtime: remote.mtime, size: remote.size },
+      ],
+      downloaded: [invalidManifest, remote],
+    });
+    const service = createService(vault, provider);
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await expect(service.sync()).resolves.toBeUndefined();
+
+    expect(vault.readText("a.md")).toBe("safe");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-error",
+      message: expect.stringContaining("download size mismatch: .sync-manifest.json"),
+    }));
+    expect(provider.calls).not.toContain("upload:.sync-manifest.json");
+  });
+
+  it("does not make overwrite decisions when manifest decryption fails", async () => {
+    const encryptedManifest = {
+      path: ".sync-manifest.json",
+      mtime: 1,
+      size: 3,
+      content: encoder.encode("bad").buffer,
+    };
+    const vault = createVault({ "a.md": "safe" });
+    const provider = createProvider({
+      listed: [{ path: encryptedManifest.path, mtime: encryptedManifest.mtime, size: encryptedManifest.size }],
+      downloaded: encryptedManifest,
+    });
+    const encryption = new Encryption("enabled");
+    encryption.decrypt = async () => null;
+    encryption.encrypt = async (data: ArrayBuffer) => data;
+    const service = createService(vault, provider, { encryption });
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await expect(service.sync()).resolves.toBeUndefined();
+
+    expect(vault.readText("a.md")).toBe("safe");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-error",
+      message: expect.stringContaining("decryption failed"),
+    }));
+    expect(provider.calls).not.toContain("upload:a.md");
+    expect(provider.calls).not.toContain("upload:.sync-manifest.json");
+  });
+
+  it("preserves the target and removes only the temp file when temporary stat verification fails", async () => {
+    const vault = createVault({ "a.md": "safe" });
+    const originalStat = vault.adapter.stat;
+    vault.adapter.stat = async (path: string) => {
+      const stat = await originalStat(path);
+      return stat && path.includes(".sync-save-tmp-") ? { ...stat, size: stat.size + 1 } : stat;
+    };
+    const provider = createProvider({
+      listed: [{ path: "a.md", mtime: 2, size: 3 }],
+      downloaded: { path: "a.md", mtime: 2, size: 3, content: encoder.encode("new").buffer },
+    });
+    const service = createService(vault, provider);
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await expect(service.sync()).resolves.toBeUndefined();
+
+    expect(vault.readText("a.md")).toBe("safe");
+    expect(vault.getFiles().map((file) => file.path)).toEqual(["a.md"]);
+    expect(vault.calls.filter((call) => call.startsWith("remove:"))).toHaveLength(1);
+    expect(vault.calls).not.toContain("remove:a.md");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-error",
+      message: expect.stringContaining("temporary write mismatch: a.md"),
+    }));
+  });
+
+  it("preserves the target and removes only the temp file when atomic rename fails", async () => {
+    const vault = createVault({ "a.md": "safe" });
+    vault.adapter.rename = async (from: string, to: string) => {
+      vault.calls.push(`rename:${from}:${to}`);
+      throw new Error("rename failed");
+    };
+    const provider = createProvider({
+      listed: [{ path: "a.md", mtime: 2, size: 3 }],
+      downloaded: { path: "a.md", mtime: 2, size: 3, content: encoder.encode("new").buffer },
+    });
+    const service = createService(vault, provider);
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await expect(service.sync()).resolves.toBeUndefined();
+
+    expect(vault.readText("a.md")).toBe("safe");
+    expect(vault.getFiles().map((file) => file.path)).toEqual(["a.md"]);
+    expect(vault.calls.filter((call) => call.startsWith("remove:"))).toHaveLength(1);
+    expect(vault.calls).not.toContain("remove:a.md");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-error",
+      message: expect.stringContaining("rename failed"),
+    }));
+  });
+
+  it("does not delete the remote source when its trash upload fails", async () => {
+    const manifest = manifestFile(2, {
+      "old.md": { localMtime: 1, remoteMtime: 1, size: 3, hash: "old" },
+    });
+    const old = { path: "old.md", mtime: 2, size: 3, content: encoder.encode("old").buffer };
+    const vault = createVault({});
+    const provider = createProvider({
+      listed: [
+        { path: manifest.path, mtime: manifest.mtime, size: manifest.size },
+        { path: old.path, mtime: old.mtime, size: old.size },
+      ],
+      downloaded: [manifest, old],
+    });
+    const originalUpload = provider.uploadFile.bind(provider);
+    provider.uploadFile = async (path: string, content: ArrayBuffer, mtime: number) => {
+      if (path.startsWith(".sync-trash/")) {
+        provider.calls.push(`upload:${path}`);
+        throw new Error("trash upload failed");
+      }
+      await originalUpload(path, content, mtime);
+    };
+    const service = createService(vault, provider, { syncMode: "upload-delete" });
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await expect(service.sync()).resolves.toBeUndefined();
+
+    expect(provider.calls.some((call) => call.startsWith("upload:.sync-trash/"))).toBe(true);
+    expect(provider.calls).not.toContain("delete:old.md");
+    expect(provider.calls).not.toContain("upload:.sync-manifest.json");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-error",
+      message: expect.stringContaining("trash upload failed"),
+    }));
+  });
+
   it("accepts a valid zero-byte remote file", async () => {
     const vault = createVault({});
     const provider = createProvider({
