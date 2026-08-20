@@ -321,6 +321,18 @@ export class SyncService {
     if (parsed.version !== 2 || !parsed.files || typeof parsed.files !== "object" || Array.isArray(parsed.files)) {
       throw new Error("invalid sync manifest");
     }
+    for (const [path, entry] of Object.entries(parsed.files)) {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !Number.isFinite((entry as any).localMtime) ||
+        !Number.isFinite((entry as any).remoteMtime) ||
+        !Number.isFinite((entry as any).size) ||
+        typeof (entry as any).hash !== "string"
+      ) {
+        throw new Error(`invalid sync manifest entry: ${path}`);
+      }
+    }
     return parsed as SyncManifest;
   }
 

@@ -263,6 +263,71 @@ describe("SyncService", () => {
     expect(provider.calls).not.toContain("upload:.sync-manifest.json");
   });
 
+  it("blocks upload-delete actions for every malformed v2 manifest entry field", async () => {
+    const malformedEntries = [
+      { localMtime: "bad", remoteMtime: 1, size: 3, hash: "old" },
+      { localMtime: 1, remoteMtime: "bad", size: 3, hash: "old" },
+      { localMtime: 1, remoteMtime: 1, size: "bad", hash: "old" },
+      { localMtime: 1, remoteMtime: 1, size: 3, hash: 42 },
+    ];
+
+    for (const malformedEntry of malformedEntries) {
+      const manifest = manifestFile(2, { "old.md": malformedEntry });
+      const old = { path: "old.md", mtime: 2, size: 3, content: encoder.encode("old").buffer };
+      const vault = createVault({});
+      const provider = createProvider({
+        listed: [
+          { path: manifest.path, mtime: manifest.mtime, size: manifest.size },
+          { path: old.path, mtime: old.mtime, size: old.size },
+        ],
+        downloaded: [manifest, old],
+      });
+      const service = createService(vault, provider, { syncMode: "upload-delete" });
+      const events: SyncEvent[] = [];
+      service.on((event) => events.push(event));
+
+      await expect(service.sync()).resolves.toBeUndefined();
+
+      expect(provider.calls).not.toContain("delete:old.md");
+      expect(provider.calls.some((call) => call.startsWith("upload:.sync-trash/"))).toBe(false);
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "sync-error",
+        message: expect.stringContaining("invalid sync manifest entry: old.md"),
+      }));
+    }
+  });
+
+  it("blocks download-delete actions for non-finite v2 manifest entry numbers", async () => {
+    const numericFields = ["localMtime", "remoteMtime", "size"] as const;
+
+    for (const nonFiniteField of numericFields) {
+      const values = { localMtime: "1", remoteMtime: "1", size: "4" };
+      values[nonFiniteField] = "1e400";
+      const content = encoder.encode(
+        `{"version":2,"files":{"gone.md":{"localMtime":${values.localMtime},"remoteMtime":${values.remoteMtime},"size":${values.size},"hash":"gone"}},"timestamp":1,"vaultName":"test-vault"}`,
+      ).buffer;
+      const manifest = { path: ".sync-manifest.json", mtime: 1, size: content.byteLength, content };
+      const vault = createVault({ "gone.md": "gone" });
+      const provider = createProvider({
+        listed: [{ path: manifest.path, mtime: manifest.mtime, size: manifest.size }],
+        downloaded: manifest,
+      });
+      const service = createService(vault, provider, { syncMode: "download-delete" });
+      const events: SyncEvent[] = [];
+      service.on((event) => events.push(event));
+
+      await expect(service.sync()).resolves.toBeUndefined();
+
+      expect(vault.getFiles().map((file) => file.path)).toContain("gone.md");
+      expect(vault.calls).not.toContain("trashSystem:gone.md");
+      expect(vault.calls).not.toContain("trashLocal:gone.md");
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "sync-error",
+        message: expect.stringContaining("invalid sync manifest entry: gone.md"),
+      }));
+    }
+  });
+
   it("preserves the target and removes only the temp file when temporary stat verification fails", async () => {
     const vault = createVault({ "a.md": "safe" });
     const originalStat = vault.adapter.stat;
