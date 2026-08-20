@@ -5,7 +5,8 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest"
   },
   "keywords": ["obsidian", "sync", "cloud", "backup"],
   "license": "MIT",
@@ -19,6 +20,7 @@
     "builtin-modules": "3.3.0",
     "esbuild": "0.17.3",
     "obsidian": "latest",
+    "vitest": "^2.1.9",
     "tslib": "2.4.0",
     "typescript": "4.7.4"
   }
