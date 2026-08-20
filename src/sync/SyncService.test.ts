@@ -495,6 +495,25 @@ describe("SyncService", () => {
     expect(provider.calls.filter((call) => call.startsWith("upload:") || call.startsWith("delete:"))).toEqual([]);
   });
 
+  it("uses the manifest remote size to avoid re-downloading encrypted payloads", async () => {
+    const manifest = manifestFile(2, {
+      "a.md": { localMtime: 2, remoteMtime: 3, size: 3, remoteSize: 20, hash: "cached" },
+    });
+    const vault = createVault({ "a.md": "abc" });
+    const provider = createProvider({
+      listed: [
+        { path: manifest.path, mtime: manifest.mtime, size: manifest.size },
+        { path: "a.md", mtime: 3, size: 20 },
+      ],
+      downloaded: [manifest, { path: "a.md", mtime: 3, size: 20, content: encoder.encode("remote").buffer }],
+    });
+
+    await createService(vault, provider).createPlan();
+
+    expect(provider.calls).toContain("download:.sync-manifest.json");
+    expect(provider.calls).not.toContain("download:a.md");
+  });
+
   it("treats a legacy version 1 manifest as an empty baseline without importing remote-only files", async () => {
     const legacy = manifestFile(1, { "remote.md": { mtime: 1, size: 6, hash: "old" } });
     const remote = { path: "remote.md", mtime: 2, size: 6, content: encoder.encode("remote").buffer };
