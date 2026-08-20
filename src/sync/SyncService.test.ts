@@ -153,6 +153,47 @@ function manifestFile(version: 1 | 2, files: Record<string, unknown>): SyncFile 
 }
 
 describe("SyncService", () => {
+  it("does not mutate when destructive change percentage exceeds the threshold", async () => {
+    const manifest = manifestFile(2, {
+      "a.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "a" },
+      "b.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "b" },
+    });
+    const vault = createVault({ "a.md": "a", "b.md": "b" });
+    const provider = createProvider({
+      listed: [{ path: manifest.path, mtime: manifest.mtime, size: manifest.size }],
+      downloaded: manifest,
+    });
+    const service = createService(vault, provider, {
+      syncMode: "download-delete",
+      largeChangeThreshold: 50,
+    });
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await expect(service.sync()).rejects.toThrow("large change protection");
+
+    expect(vault.calls).toEqual([]);
+    expect(provider.calls.filter((call) => call.startsWith("upload:") || call.startsWith("delete:"))).toEqual([]);
+    expect(events.filter((event) => event.type === "sync-error")).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining("2 destructive actions out of 2 comparable paths (100.0%)"),
+      }),
+    ]);
+  });
+
+  it("finds only timestamped conflict copies", async () => {
+    const vault = createVault({
+      "note.conflict-2026-08-20T00-00-00-000Z.md": "conflict",
+      "note.conflict-copy.md": "not a conflict copy",
+      "plain.md": "plain",
+    });
+    const provider = createProvider({ listed: [], downloaded: [] });
+
+    await expect(createService(vault, provider).findConflictCopies()).resolves.toEqual([
+      "note.conflict-2026-08-20T00-00-00-000Z.md",
+    ]);
+  });
+
   it("does not overwrite an existing local file when remote byte length differs from listed metadata", async () => {
     const vault = createVault({ "a.md": "safe local content" });
     const provider = createProvider({
@@ -339,7 +380,7 @@ describe("SyncService", () => {
       listed: [{ path: "a.md", mtime: 2, size: 3 }],
       downloaded: { path: "a.md", mtime: 2, size: 3, content: encoder.encode("new").buffer },
     });
-    const service = createService(vault, provider);
+    const service = createService(vault, provider, { largeChangeThreshold: 0 });
     const events: SyncEvent[] = [];
     service.on((event) => events.push(event));
 
@@ -365,7 +406,7 @@ describe("SyncService", () => {
       listed: [{ path: "a.md", mtime: 2, size: 3 }],
       downloaded: { path: "a.md", mtime: 2, size: 3, content: encoder.encode("new").buffer },
     });
-    const service = createService(vault, provider);
+    const service = createService(vault, provider, { largeChangeThreshold: 0 });
     const events: SyncEvent[] = [];
     service.on((event) => events.push(event));
 
@@ -402,7 +443,7 @@ describe("SyncService", () => {
       }
       await originalUpload(path, content, mtime);
     };
-    const service = createService(vault, provider, { syncMode: "upload-delete" });
+    const service = createService(vault, provider, { syncMode: "upload-delete", largeChangeThreshold: 0 });
     const events: SyncEvent[] = [];
     service.on((event) => events.push(event));
 

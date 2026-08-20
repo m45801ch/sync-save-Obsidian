@@ -12,6 +12,8 @@ import {
 
 const MANIFEST_PATH = ".sync-manifest.json";
 const TRASH_ROOT = ".sync-trash";
+const CONFLICT_COPY_PATTERN = /\.conflict-\d{4}-\d{2}-\d{2}T/;
+const LARGE_CHANGE_PROTECTION_ERROR = "large change protection";
 
 export type SyncEventType =
   | "sync-start"
@@ -107,6 +109,22 @@ export class SyncService {
       }
 
       const plan = await this.createPlan();
+      const percentage = plan.comparableExistingPathCount === 0
+        ? 0
+        : (plan.destructivePathCount / plan.comparableExistingPathCount) * 100;
+      const threshold = this.options.largeChangeThreshold;
+      if (threshold && threshold > 0 && threshold < 100 && percentage > threshold) {
+        const actionCounts = plan.actions.reduce((counts, action) => {
+          counts[action.type] = (counts[action.type] ?? 0) + 1;
+          return counts;
+        }, {} as Record<string, number>);
+        const actions = Object.entries(actionCounts).map(([type, count]) => `${type}=${count}`).join(", ");
+        this.emit({
+          type: "sync-error",
+          message: `Large change protection: ${plan.destructivePathCount} destructive actions out of ${plan.comparableExistingPathCount} comparable paths (${percentage.toFixed(1)}%). Actions: ${actions}`,
+        });
+        throw new Error(LARGE_CHANGE_PROTECTION_ERROR);
+      }
       this.emit({
         type: "sync-progress",
         message: `Planned ${plan.actions.length} sync actions`,
@@ -119,6 +137,7 @@ export class SyncService {
       this.lastSyncTime = Date.now();
       this.emit({ type: "sync-complete", message: "Sync completed successfully" });
     } catch (error) {
+      if (error instanceof Error && error.message === LARGE_CHANGE_PROTECTION_ERROR) throw error;
       this.emit({
         type: "sync-error",
         message: `Sync failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -179,6 +198,12 @@ export class SyncService {
       conflictStrategy: this.options.conflictStrategy,
       now: new Date(),
     });
+  }
+
+  async findConflictCopies(): Promise<string[]> {
+    return this.vault.getFiles()
+      .map((file) => file.path)
+      .filter((path) => CONFLICT_COPY_PATTERN.test(path));
   }
 
   async executePlan(plan: SyncPlan): Promise<void> {
