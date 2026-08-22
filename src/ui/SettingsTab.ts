@@ -873,7 +873,7 @@ export class SyncSaveSettingsTab extends PluginSettingTab {
       } else if (val === "download-only") {
         modeDesc.setText("💡 單向回復：將雲端檔案單向同步下載並覆蓋至本機，不發送本機的任何修改。適合在全新裝置上進行初始還原。");
       } else if (val === "local-cleanup") {
-        modeDesc.setText("💡 整理本地資料庫：只掃描本地 Vault，以檔名找出重複檔案，保留分類資料夾的檔案，將 public/（含子資料夾）的重複檔移至本機回收桶，不連線雲端。");
+        modeDesc.setText("💡 整理本地資料庫：掃描本地 Vault，以檔名找出根目錄檔案與子資料夾的重複，保留分類資料夾的檔案，將根目錄檔案移至本機回收桶，不連線雲端。");
       } else if (val === "upload-delete") {
         modeDesc.setText("💡 增量推送帶刪除：將本機新增或修改推送到雲端，並把本機已刪除的遠端檔案移入雲端垃圾桶。適合以本機為準的鏡像同步。");
       } else if (val === "download-delete") {

@@ -208,10 +208,10 @@ describe("SyncService", () => {
     }));
   });
 
-  it("整理本地資料庫只移動 public 重複檔，不接觸雲端或分類檔", async () => {
+  it("整理本地資料庫只移動根目錄重複檔，不接觸雲端或分類檔", async () => {
     const vault = createVault({
-      "public/note.md": "public copy",
-      "public/archive/image.png": encoder.encode("public image").buffer,
+      "note.md": "public copy",
+      "image.png": encoder.encode("public image").buffer,
       "Projects/note.md": "categorized copy",
       "Media/archive/image.png": encoder.encode("categorized image").buffer,
     });
@@ -226,8 +226,8 @@ describe("SyncService", () => {
     await service.sync();
 
     expect(vault.calls).toEqual([
-      "trashSystem:public/note.md",
-      "trashSystem:public/archive/image.png",
+      "trashSystem:note.md",
+      "trashSystem:image.png",
     ]);
     expect(vault.getFiles().map((file) => file.path)).toEqual([
       "Projects/note.md",
