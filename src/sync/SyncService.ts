@@ -9,6 +9,7 @@ import {
   SyncMode,
   SyncPlan,
 } from "./SyncPlanner";
+import { findPublicDuplicatePaths, isPublicPath } from "./PublicDuplicateCleanup";
 
 const MANIFEST_PATH = ".sync-manifest.json";
 const TRASH_ROOT = ".sync-trash";
@@ -20,7 +21,15 @@ export type SyncEventType =
   | "sync-complete"
   | "sync-error"
   | "sync-file"
+  | "sync-summary"
   | "conflict";
+
+export interface SyncSummary {
+  total: number;
+  success: number;
+  failed: number;
+  trashed: number;
+}
 
 export interface SyncEvent {
   type: SyncEventType;
@@ -28,6 +37,7 @@ export interface SyncEvent {
   progress?: { current: number; total: number };
   file?: string;
   providerId?: string;
+  summary?: SyncSummary;
 }
 
 export interface SyncOptions {
@@ -63,6 +73,8 @@ export class SyncService {
   private vault: Vault;
   private plannedLocal = new Map<string, LocalFileSnapshot>();
   private plannedRemote = new Map<string, FileSnapshot>();
+  private publicCleanupCandidates = new Set<string>();
+  private currentSummary: SyncSummary | null = null;
 
   constructor(vault: Vault, options: SyncOptions) {
     this.vault = vault;
@@ -100,6 +112,7 @@ export class SyncService {
     }
 
     this.isSyncing = true;
+    this.currentSummary = { total: 0, success: 0, failed: 0, trashed: 0 };
     this.emit({ type: "sync-start", message: "Starting sync..." });
 
     try {
@@ -108,6 +121,7 @@ export class SyncService {
       }
 
       const plan = await this.createPlan();
+      this.currentSummary.total = plan.actions.length;
       this.emit({
         type: "sync-progress",
         message: `Planned ${plan.actions.length} sync actions`,
@@ -141,6 +155,9 @@ export class SyncService {
         message: `Sync failed: ${error instanceof Error ? error.message : String(error)}`,
       });
     } finally {
+      if (this.currentSummary) {
+        this.emit({ type: "sync-summary", message: "Sync summary", summary: { ...this.currentSummary } });
+      }
       this.isSyncing = false;
       try {
         await this.provider.disconnect();
@@ -159,6 +176,12 @@ export class SyncService {
     const manifestFiles = manifest?.files ?? {};
     const localByPath = new Map(local.map((file) => [file.path, file]));
     const remoteByPath = new Map(remote.map((file) => [file.path, file]));
+    this.publicCleanupCandidates = this.isPublicCleanupMode()
+      ? new Set([
+        ...local.filter((file) => isPublicPath(file.path) && !Object.prototype.hasOwnProperty.call(manifestFiles, file.path)).map((file) => file.path),
+        ...remote.filter((file) => isPublicPath(file.path) && !Object.prototype.hasOwnProperty.call(manifestFiles, file.path)).map((file) => file.path),
+      ])
+      : new Set();
 
     for (const file of local) {
       if (!remoteByPath.has(file.path)) continue;
@@ -188,7 +211,7 @@ export class SyncService {
     this.plannedLocal = localByPath;
     this.plannedRemote = new Map(remoteSnapshots.map((file) => [file.path, file]));
 
-    return buildSyncPlan({
+    const plan = buildSyncPlan({
       local,
       remote: remoteSnapshots,
       manifestFiles,
@@ -196,6 +219,11 @@ export class SyncService {
       conflictStrategy: this.options.conflictStrategy,
       now: new Date(),
     });
+    if (this.isPublicCleanupMode()) {
+      const duplicatePublicPaths = new Set(findPublicDuplicatePaths(local.map((file) => file.path), this.publicCleanupCandidates));
+      plan.actions = plan.actions.filter((action) => !(action.type === "upload" && duplicatePublicPaths.has(action.path)));
+    }
+    return plan;
   }
 
   static async findConflictCopies(vault: Vault): Promise<string[]> {
@@ -224,7 +252,13 @@ export class SyncService {
 
     let current = 0;
     for (const action of actions) {
-      await this.executeAction(action);
+      try {
+        await this.executeAction(action);
+        this.recordSuccess(action.type);
+      } catch (error) {
+        this.recordFailure();
+        throw error;
+      }
       current++;
       this.emit({
         type: "sync-file",
@@ -234,7 +268,67 @@ export class SyncService {
       });
     }
 
+    await this.cleanupPublicDuplicates();
     await this.saveManifest();
+  }
+
+  private isPublicCleanupMode(): boolean {
+    const mode = this.getSyncMode();
+    return mode === "bidirectional" || mode === "download-only" || mode === "download-delete";
+  }
+
+  private recordSuccess(actionType?: SyncAction["type"]): void {
+    if (!this.currentSummary) return;
+    this.currentSummary.success++;
+    if (actionType === "move-remote-to-trash" || actionType === "delete-local") this.currentSummary.trashed++;
+  }
+
+  private recordFailure(): void {
+    if (this.currentSummary) this.currentSummary.failed++;
+  }
+
+  private async cleanupPublicDuplicates(): Promise<void> {
+    if (!this.isPublicCleanupMode() || this.publicCleanupCandidates.size === 0) return;
+
+    const localPaths = this.vault.getFiles().map((file) => file.path);
+    const localDuplicates = findPublicDuplicatePaths(localPaths, this.publicCleanupCandidates);
+    for (const path of localDuplicates) {
+      if (this.currentSummary) this.currentSummary.total++;
+      try {
+        if (this.options.localDeleteDestination === "obsidian-trash") {
+          await this.vault.adapter.trashLocal(path);
+        } else {
+          await this.vault.adapter.trashSystem(path);
+        }
+        this.recordSuccess();
+        if (this.currentSummary) this.currentSummary.trashed++;
+        this.emit({ type: "sync-file", message: `同名 public/ 檔案已移至回收桶：${path}`, file: path });
+      } catch (error) {
+        this.recordFailure();
+        this.emit({ type: "sync-error", message: `移動 public/ 同名檔案至回收桶失敗：${path}（${error instanceof Error ? error.message : String(error)}）`, file: path });
+      }
+    }
+
+    const remote = (await this.provider.listFiles(""))
+      .filter((file) => file.path !== MANIFEST_PATH && !this.isTrashPath(file.path) && !this.shouldSkip(file.path));
+    const remoteDuplicates = [...new Set(findPublicDuplicatePaths(
+      [...localPaths, ...remote.map((file) => file.path)],
+      this.publicCleanupCandidates,
+    ))].filter((path) => remote.some((file) => file.path === path));
+    for (const path of remoteDuplicates) {
+      const remoteFile = remote.find((file) => file.path === path);
+      if (!remoteFile) continue;
+      if (this.currentSummary) this.currentSummary.total++;
+      try {
+        await this.moveToTrash(path, remoteFile.size);
+        this.recordSuccess();
+        if (this.currentSummary) this.currentSummary.trashed++;
+        this.emit({ type: "sync-file", message: `雲端同名 public/ 檔案已移至回收桶：${path}`, file: path });
+      } catch (error) {
+        this.recordFailure();
+        this.emit({ type: "sync-error", message: `移動雲端 public/ 同名檔案至回收桶失敗：${path}（${error instanceof Error ? error.message : String(error)}）`, file: path });
+      }
+    }
   }
 
   private async executeAction(action: SyncAction): Promise<void> {

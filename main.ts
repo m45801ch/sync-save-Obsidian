@@ -587,6 +587,16 @@ export default class SyncSavePlugin extends Plugin {
         new Notice(`同步備份：${event.message}`);
         this.log(event.message);
         break;
+
+      case "sync-summary": {
+        const summary = event.summary;
+        if (!summary) break;
+        const prefix = providerName ? `[${providerName}] ` : "";
+        const message = `同步資訊：${prefix}同步數量 ${summary.total}，成功 ${summary.success}，失敗 ${summary.failed}，丟入回收桶 ${summary.trashed}`;
+        new Notice(message);
+        this.log(message);
+        break;
+      }
     }
   }
 
