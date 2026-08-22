@@ -195,6 +195,36 @@ function buildSyncPlan(input) {
   };
 }
 
+// src/sync/PublicDuplicateCleanup.ts
+var PUBLIC_PREFIX = "public/";
+function isPublicPath(path) {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.startsWith(PUBLIC_PREFIX) && !normalized.slice(PUBLIC_PREFIX.length).includes("/");
+}
+function isUnderPublic(path) {
+  return path.replace(/\\/g, "/").startsWith(PUBLIC_PREFIX);
+}
+function baseName(path) {
+  var _a;
+  return (_a = path.replace(/\\/g, "/").split("/").pop()) != null ? _a : path;
+}
+function findPublicDuplicatePaths(paths, candidates) {
+  var _a;
+  const pathsByName = /* @__PURE__ */ new Map();
+  for (const path of paths) {
+    const name = baseName(path);
+    const grouped = (_a = pathsByName.get(name)) != null ? _a : [];
+    grouped.push(path);
+    pathsByName.set(name, grouped);
+  }
+  return paths.filter((path) => {
+    var _a2;
+    if (!isPublicPath(path) || !candidates.has(path))
+      return false;
+    return ((_a2 = pathsByName.get(baseName(path))) != null ? _a2 : []).some((otherPath) => otherPath !== path && !isUnderPublic(otherPath));
+  });
+}
+
 // src/sync/SyncService.ts
 var MANIFEST_PATH = ".sync-manifest.json";
 var TRASH_ROOT = ".sync-trash";
@@ -207,6 +237,8 @@ var SyncService = class {
     this.syncTimer = null;
     this.plannedLocal = /* @__PURE__ */ new Map();
     this.plannedRemote = /* @__PURE__ */ new Map();
+    this.publicCleanupCandidates = /* @__PURE__ */ new Set();
+    this.currentSummary = null;
     this.vault = vault;
     this.options = options;
     this.provider = options.provider;
@@ -235,12 +267,14 @@ var SyncService = class {
       return;
     }
     this.isSyncing = true;
+    this.currentSummary = { total: 0, success: 0, failed: 0, trashed: 0 };
     this.emit({ type: "sync-start", message: "Starting sync..." });
     try {
       if (!await this.provider.connect()) {
         throw new Error("Failed to connect to cloud provider");
       }
       const plan = await this.createPlan();
+      this.currentSummary.total = plan.actions.length;
       this.emit({
         type: "sync-progress",
         message: `Planned ${plan.actions.length} sync actions`,
@@ -272,6 +306,9 @@ var SyncService = class {
         message: `Sync failed: ${error instanceof Error ? error.message : String(error)}`
       });
     } finally {
+      if (this.currentSummary) {
+        this.emit({ type: "sync-summary", message: "Sync summary", summary: { ...this.currentSummary } });
+      }
       this.isSyncing = false;
       try {
         await this.provider.disconnect();
@@ -291,6 +328,10 @@ var SyncService = class {
     const manifestFiles = (_a = manifest == null ? void 0 : manifest.files) != null ? _a : {};
     const localByPath = new Map(local.map((file) => [file.path, file]));
     const remoteByPath = new Map(remote.map((file) => [file.path, file]));
+    this.publicCleanupCandidates = this.isPublicCleanupMode() ? /* @__PURE__ */ new Set([
+      ...local.filter((file) => isPublicPath(file.path) && !Object.prototype.hasOwnProperty.call(manifestFiles, file.path)).map((file) => file.path),
+      ...remote.filter((file) => isPublicPath(file.path) && !Object.prototype.hasOwnProperty.call(manifestFiles, file.path)).map((file) => file.path)
+    ]) : /* @__PURE__ */ new Set();
     for (const file of local) {
       if (!remoteByPath.has(file.path))
         continue;
@@ -317,7 +358,7 @@ var SyncService = class {
     }
     this.plannedLocal = localByPath;
     this.plannedRemote = new Map(remoteSnapshots.map((file) => [file.path, file]));
-    return buildSyncPlan({
+    const plan = buildSyncPlan({
       local,
       remote: remoteSnapshots,
       manifestFiles,
@@ -325,6 +366,11 @@ var SyncService = class {
       conflictStrategy: this.options.conflictStrategy,
       now: new Date()
     });
+    if (this.isPublicCleanupMode()) {
+      const duplicatePublicPaths = new Set(findPublicDuplicatePaths(local.map((file) => file.path), this.publicCleanupCandidates));
+      plan.actions = plan.actions.filter((action) => !(action.type === "upload" && duplicatePublicPaths.has(action.path)));
+    }
+    return plan;
   }
   static async findConflictCopies(vault) {
     return vault.getFiles().map((file) => file.path).filter((path) => CONFLICT_COPY_PATTERN.test(path));
@@ -344,7 +390,13 @@ var SyncService = class {
     const actions = plan.actions.map((action, index) => ({ action, index })).sort((left, right) => order[left.action.type] - order[right.action.type] || left.index - right.index).map(({ action }) => action);
     let current = 0;
     for (const action of actions) {
-      await this.executeAction(action);
+      try {
+        await this.executeAction(action);
+        this.recordSuccess(action.type);
+      } catch (error) {
+        this.recordFailure();
+        throw error;
+      }
       current++;
       this.emit({
         type: "sync-file",
@@ -353,7 +405,69 @@ var SyncService = class {
         progress: { current, total: actions.length }
       });
     }
+    await this.cleanupPublicDuplicates();
     await this.saveManifest();
+  }
+  isPublicCleanupMode() {
+    const mode = this.getSyncMode();
+    return mode === "bidirectional" || mode === "download-only" || mode === "download-delete";
+  }
+  recordSuccess(actionType) {
+    if (!this.currentSummary)
+      return;
+    this.currentSummary.success++;
+    if (actionType === "move-remote-to-trash" || actionType === "delete-local")
+      this.currentSummary.trashed++;
+  }
+  recordFailure() {
+    if (this.currentSummary)
+      this.currentSummary.failed++;
+  }
+  async cleanupPublicDuplicates() {
+    if (!this.isPublicCleanupMode() || this.publicCleanupCandidates.size === 0)
+      return;
+    const localPaths = this.vault.getFiles().map((file) => file.path);
+    const localDuplicates = findPublicDuplicatePaths(localPaths, this.publicCleanupCandidates);
+    for (const path of localDuplicates) {
+      if (this.currentSummary)
+        this.currentSummary.total++;
+      try {
+        if (this.options.localDeleteDestination === "obsidian-trash") {
+          await this.vault.adapter.trashLocal(path);
+        } else {
+          await this.vault.adapter.trashSystem(path);
+        }
+        this.recordSuccess();
+        if (this.currentSummary)
+          this.currentSummary.trashed++;
+        this.emit({ type: "sync-file", message: `\u540C\u540D public/ \u6A94\u6848\u5DF2\u79FB\u81F3\u56DE\u6536\u6876\uFF1A${path}`, file: path });
+      } catch (error) {
+        this.recordFailure();
+        this.emit({ type: "sync-error", message: `\u79FB\u52D5 public/ \u540C\u540D\u6A94\u6848\u81F3\u56DE\u6536\u6876\u5931\u6557\uFF1A${path}\uFF08${error instanceof Error ? error.message : String(error)}\uFF09`, file: path });
+      }
+    }
+    const remote = (await this.provider.listFiles("")).filter((file) => file.path !== MANIFEST_PATH && !this.isTrashPath(file.path) && !this.shouldSkip(file.path));
+    const remoteDuplicates = [...new Set(findPublicDuplicatePaths(
+      [...localPaths, ...remote.map((file) => file.path)],
+      this.publicCleanupCandidates
+    ))].filter((path) => remote.some((file) => file.path === path));
+    for (const path of remoteDuplicates) {
+      const remoteFile = remote.find((file) => file.path === path);
+      if (!remoteFile)
+        continue;
+      if (this.currentSummary)
+        this.currentSummary.total++;
+      try {
+        await this.moveToTrash(path, remoteFile.size);
+        this.recordSuccess();
+        if (this.currentSummary)
+          this.currentSummary.trashed++;
+        this.emit({ type: "sync-file", message: `\u96F2\u7AEF\u540C\u540D public/ \u6A94\u6848\u5DF2\u79FB\u81F3\u56DE\u6536\u6876\uFF1A${path}`, file: path });
+      } catch (error) {
+        this.recordFailure();
+        this.emit({ type: "sync-error", message: `\u79FB\u52D5\u96F2\u7AEF public/ \u540C\u540D\u6A94\u6848\u81F3\u56DE\u6536\u6876\u5931\u6557\uFF1A${path}\uFF08${error instanceof Error ? error.message : String(error)}\uFF09`, file: path });
+      }
+    }
   }
   async executeAction(action) {
     if (action.type === "skip")
@@ -3988,6 +4102,16 @@ var SyncSavePlugin = class extends import_obsidian7.Plugin {
         new import_obsidian7.Notice(`\u540C\u6B65\u5099\u4EFD\uFF1A${event.message}`);
         this.log(event.message);
         break;
+      case "sync-summary": {
+        const summary = event.summary;
+        if (!summary)
+          break;
+        const prefix = providerName ? `[${providerName}] ` : "";
+        const message = `\u540C\u6B65\u8CC7\u8A0A\uFF1A${prefix}\u540C\u6B65\u6578\u91CF ${summary.total}\uFF0C\u6210\u529F ${summary.success}\uFF0C\u5931\u6557 ${summary.failed}\uFF0C\u4E1F\u5165\u56DE\u6536\u6876 ${summary.trashed}`;
+        new import_obsidian7.Notice(message);
+        this.log(message);
+        break;
+      }
     }
   }
   log(message) {

@@ -181,6 +181,33 @@ describe("SyncService", () => {
     ]);
   });
 
+  it("moves a newly pulled public duplicate to the local recycle bin and reports counts", async () => {
+    const manifest = manifestFile(2, {});
+    const publicFile = { path: "public/note.md", mtime: 2, size: 8, content: encoder.encode("new note").buffer };
+    const vault = createVault({ "Projects/note.md": "categorized" });
+    const provider = createProvider({
+      listed: [
+        { path: manifest.path, mtime: manifest.mtime, size: manifest.size },
+        { path: publicFile.path, mtime: publicFile.mtime, size: publicFile.size },
+      ],
+      downloaded: [manifest, publicFile],
+    });
+    const service = createService(vault, provider, {
+      syncMode: "download-only",
+      largeChangeThreshold: 0,
+    });
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await service.sync();
+
+    expect(vault.calls).toContain("trashSystem:public/note.md");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-summary",
+      summary: { total: 3, success: 3, failed: 0, trashed: 2 },
+    }));
+  });
+
   it("reports the planned action count before blocking a large change", async () => {
     const manifest = manifestFile(2, {
       "a.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "a" },

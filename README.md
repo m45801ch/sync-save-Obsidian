@@ -71,6 +71,8 @@ Choose a sync direction deliberately:
 
 Remote deletions are never permanently deleted during sync: they always move to `.sync-trash/` first. The retention setting controls when old files in that folder may later be removed.
 
+When a newly added file directly under `public/` has the same filename as a file in another folder, bidirectional sync and both download modes preserve the categorized file and move the `public/` copy to the configured local trash. The cloud copy is moved to `.sync-trash/`. Each provider also reports the total, successful, failed, and trashed operation counts after a sync.
+
 Large-change protection is enabled by default at 50%. The settings UI provides presets from `0` to `100` in 10-point steps, plus a custom value. `0` disables protection and `100` allows any percentage. Before any sync mutation, Sync Save compares destructive changes with existing comparable paths; newly added files do not count. If the percentage is greater than the configured threshold, the status shows the planned action count and then clearly reports `同步未執行` without changing local or cloud files. During execution, the status bar shows `[PROVIDER] 同步中 current/total`, and each provider reports its own completion or blocked result.
 
 ### Google Drive recovery warning
