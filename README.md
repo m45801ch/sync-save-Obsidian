@@ -68,6 +68,7 @@ Choose a sync direction deliberately:
 - **Download-only** pulls cloud additions and edits to the vault, without uploading local changes.
 - **Upload-delete** pushes local additions and edits; a remote file that was previously synced and is now deleted locally is moved to the remote `.sync-trash/<date>/` folder.
 - **Download-delete** pulls cloud additions and edits; a local file that was previously synced and is now deleted in the cloud is moved to the selected local system or Obsidian trash.
+- **Local database cleanup** scans every file in the local vault by filename, preserves files outside `public/`, and moves duplicate files under `public/` (including subfolders) to the selected local trash without contacting the cloud.
 
 Remote deletions are never permanently deleted during sync: they always move to `.sync-trash/` first. The retention setting controls when old files in that folder may later be removed.
 

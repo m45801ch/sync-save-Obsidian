@@ -3,7 +3,8 @@ export type SyncMode =
   | "upload-only"
   | "download-only"
   | "upload-delete"
-  | "download-delete";
+  | "download-delete"
+  | "local-cleanup";
 
 export type ConflictStrategy = "keep-newer" | "keep-larger" | "smart";
 
@@ -60,6 +61,9 @@ export function buildSyncPlan(input: {
   conflictStrategy: ConflictStrategy;
   now: Date;
 }): SyncPlan {
+  if (input.mode === "local-cleanup") {
+    return { actions: [], destructivePathCount: 0, comparableExistingPathCount: 0 };
+  }
   const localByPath = new Map(input.local.map((entry) => [entry.path, entry]));
   const remoteByPath = new Map(input.remote.map((entry) => [entry.path, entry]));
   const paths = new Set([...localByPath.keys(), ...remoteByPath.keys()]);

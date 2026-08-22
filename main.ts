@@ -327,6 +327,36 @@ export default class SyncSavePlugin extends Plugin {
     }
 
     const enabled = this.settings.enabledProviders;
+    if (this.settings.syncMode === "local-cleanup") {
+      this.isCurrentlySyncing = true;
+      const encryption = new Encryption(this.settings.encryptionPassword);
+      try {
+        const syncService = new SyncService(this.app.vault, {
+          provider: undefined as any,
+          encryption,
+          vaultName: this.app.vault.getName(),
+          syncOnSave: this.settings.syncOnSave,
+          syncInterval: this.settings.syncInterval,
+          skipHidden: this.settings.skipHidden,
+          skipPaths: this.settings.skipPaths,
+          conflictStrategy: this.settings.conflictStrategy as any,
+          syncConfig: this.settings.syncConfig,
+          syncMode: "local-cleanup",
+          localDeleteDestination: this.settings.localDeleteDestination,
+          largeChangeThreshold: this.settings.largeChangeThreshold,
+          trashRetentionDays: this.settings.trashRetentionDays,
+        });
+        syncService.on((event: SyncEvent) => this.handleSyncEvent({
+          ...event,
+          message: `[LOCAL] ${event.message}`,
+          providerId: "local",
+        }));
+        await syncService.sync();
+      } finally {
+        this.isCurrentlySyncing = false;
+      }
+      return;
+    }
     if (!enabled || enabled.length === 0) {
       new Notice("同步備份：尚未啟用任何雲端服務");
       return;

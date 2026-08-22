@@ -208,6 +208,38 @@ describe("SyncService", () => {
     }));
   });
 
+  it("整理本地資料庫只移動 public 重複檔，不接觸雲端或分類檔", async () => {
+    const vault = createVault({
+      "public/note.md": "public copy",
+      "public/archive/image.png": encoder.encode("public image").buffer,
+      "Projects/note.md": "categorized copy",
+      "Media/archive/image.png": encoder.encode("categorized image").buffer,
+    });
+    const provider = createProvider({ listed: [], downloaded: [] });
+    const service = createService(vault, provider, {
+      syncMode: "local-cleanup" as any,
+      largeChangeThreshold: 50,
+    });
+    const events: SyncEvent[] = [];
+    service.on((event) => events.push(event));
+
+    await service.sync();
+
+    expect(vault.calls).toEqual([
+      "trashSystem:public/note.md",
+      "trashSystem:public/archive/image.png",
+    ]);
+    expect(vault.getFiles().map((file) => file.path)).toEqual([
+      "Projects/note.md",
+      "Media/archive/image.png",
+    ]);
+    expect(provider.calls).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "sync-summary",
+      summary: { total: 4, success: 2, failed: 0, trashed: 2 },
+    }));
+  });
+
   it("reports the planned action count before blocking a large change", async () => {
     const manifest = manifestFile(2, {
       "a.md": { localMtime: 1, remoteMtime: 1, size: 1, hash: "a" },

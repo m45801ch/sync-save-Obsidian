@@ -111,6 +111,9 @@ function conflictPath(path, now) {
 }
 function buildSyncPlan(input) {
   var _a;
+  if (input.mode === "local-cleanup") {
+    return { actions: [], destructivePathCount: 0, comparableExistingPathCount: 0 };
+  }
   const localByPath = new Map(input.local.map((entry) => [entry.path, entry]));
   const remoteByPath = new Map(input.remote.map((entry) => [entry.path, entry]));
   const paths = /* @__PURE__ */ new Set([...localByPath.keys(), ...remoteByPath.keys()]);
@@ -225,6 +228,36 @@ function findPublicDuplicatePaths(paths, candidates) {
   });
 }
 
+// src/sync/LocalDatabaseCleanup.ts
+var PUBLIC_PREFIX2 = "public/";
+function normalizePath(path) {
+  return path.replace(/\\/g, "/");
+}
+function isUnderPublic2(path) {
+  return normalizePath(path).startsWith(PUBLIC_PREFIX2);
+}
+function baseName2(path) {
+  const normalized = normalizePath(path);
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+function findDuplicatePublicPaths(paths) {
+  var _a;
+  const grouped = /* @__PURE__ */ new Map();
+  for (const path of paths) {
+    const name = baseName2(path);
+    const group = (_a = grouped.get(name)) != null ? _a : [];
+    group.push(path);
+    grouped.set(name, group);
+  }
+  return paths.filter((path) => {
+    var _a2;
+    if (!isUnderPublic2(path))
+      return false;
+    const name = baseName2(path);
+    return ((_a2 = grouped.get(name)) != null ? _a2 : []).some((otherPath) => !isUnderPublic2(otherPath));
+  });
+}
+
 // src/sync/SyncService.ts
 var MANIFEST_PATH = ".sync-manifest.json";
 var TRASH_ROOT = ".sync-trash";
@@ -269,10 +302,18 @@ var SyncService = class {
     this.isSyncing = true;
     this.currentSummary = { total: 0, success: 0, failed: 0, trashed: 0 };
     this.emit({ type: "sync-start", message: "Starting sync..." });
+    let providerConnected = false;
     try {
+      if (this.getSyncMode() === "local-cleanup") {
+        await this.cleanupLocalDatabase();
+        this.lastSyncTime = Date.now();
+        this.emit({ type: "sync-complete", message: "Local database cleanup completed" });
+        return;
+      }
       if (!await this.provider.connect()) {
         throw new Error("Failed to connect to cloud provider");
       }
+      providerConnected = true;
       const plan = await this.createPlan();
       this.currentSummary.total = plan.actions.length;
       this.emit({
@@ -311,7 +352,8 @@ var SyncService = class {
       }
       this.isSyncing = false;
       try {
-        await this.provider.disconnect();
+        if (providerConnected)
+          await this.provider.disconnect();
       } catch (e) {
       }
     }
@@ -411,6 +453,28 @@ var SyncService = class {
   isPublicCleanupMode() {
     const mode = this.getSyncMode();
     return mode === "bidirectional" || mode === "download-only" || mode === "download-delete";
+  }
+  async cleanupLocalDatabase() {
+    const paths = this.vault.getFiles().map((file) => file.path);
+    if (this.currentSummary)
+      this.currentSummary.total = paths.length;
+    const duplicates = findDuplicatePublicPaths(paths);
+    for (const path of duplicates) {
+      try {
+        if (this.options.localDeleteDestination === "obsidian-trash") {
+          await this.vault.adapter.trashLocal(path);
+        } else {
+          await this.vault.adapter.trashSystem(path);
+        }
+        this.recordSuccess();
+        if (this.currentSummary)
+          this.currentSummary.trashed++;
+        this.emit({ type: "sync-file", message: `\u672C\u5730\u91CD\u8907 public/ \u6A94\u6848\u5DF2\u79FB\u81F3\u56DE\u6536\u6876\uFF1A${path}`, file: path });
+      } catch (error) {
+        this.recordFailure();
+        this.emit({ type: "sync-error", message: `\u79FB\u52D5\u672C\u5730 public/ \u91CD\u8907\u6A94\u6848\u81F3\u56DE\u6536\u6876\u5931\u6557\uFF1A${path}\uFF08${error instanceof Error ? error.message : String(error)}\uFF09`, file: path });
+      }
+    }
   }
   recordSuccess(actionType) {
     if (!this.currentSummary)
@@ -3366,6 +3430,7 @@ var SyncSaveSettingsTab = class extends import_obsidian6.PluginSettingTab {
       { value: "bidirectional", label: "\u96D9\u5411\u540C\u6B65\uFF08\u9810\u8A2D\uFF09" },
       { value: "upload-only", label: "\u589E\u91CF\u63A8\u9001" },
       { value: "download-only", label: "\u589E\u91CF\u62C9\u53D6" },
+      { value: "local-cleanup", label: "\u6574\u7406\u672C\u5730\u8CC7\u6599\u5EAB\uFF08\u50C5\u672C\u6A5F\uFF09" },
       { value: "upload-delete", label: "\u589E\u91CF\u63A8\u9001\u5E36\u522A\u9664" },
       { value: "download-delete", label: "\u589E\u91CF\u62C9\u53D6\u5E36\u522A\u9664" }
     ];
@@ -3381,6 +3446,8 @@ var SyncSaveSettingsTab = class extends import_obsidian6.PluginSettingTab {
         modeDesc.setText("\u{1F4A1} \u55AE\u5411\u5099\u4EFD\uFF1A\u5C07\u672C\u6A5F\u7684\u65B0\u589E\u6216\u4FEE\u6539\u55AE\u5411\u540C\u6B65\u4E0A\u50B3\u5230\u96F2\u7AEF\uFF0C\u4E0D\u4E0B\u8F09\u96F2\u7AEF\u7684\u8B8A\u66F4\u3002\u9069\u5408\u505A\u70BA\u96F2\u7AEF\u5099\u4EFD\u5EAB\u4F7F\u7528\u3002");
       } else if (val === "download-only") {
         modeDesc.setText("\u{1F4A1} \u55AE\u5411\u56DE\u5FA9\uFF1A\u5C07\u96F2\u7AEF\u6A94\u6848\u55AE\u5411\u540C\u6B65\u4E0B\u8F09\u4E26\u8986\u84CB\u81F3\u672C\u6A5F\uFF0C\u4E0D\u767C\u9001\u672C\u6A5F\u7684\u4EFB\u4F55\u4FEE\u6539\u3002\u9069\u5408\u5728\u5168\u65B0\u88DD\u7F6E\u4E0A\u9032\u884C\u521D\u59CB\u9084\u539F\u3002");
+      } else if (val === "local-cleanup") {
+        modeDesc.setText("\u{1F4A1} \u6574\u7406\u672C\u5730\u8CC7\u6599\u5EAB\uFF1A\u53EA\u6383\u63CF\u672C\u5730 Vault\uFF0C\u4EE5\u6A94\u540D\u627E\u51FA\u91CD\u8907\u6A94\u6848\uFF0C\u4FDD\u7559\u5206\u985E\u8CC7\u6599\u593E\u7684\u6A94\u6848\uFF0C\u5C07 public/\uFF08\u542B\u5B50\u8CC7\u6599\u593E\uFF09\u7684\u91CD\u8907\u6A94\u79FB\u81F3\u672C\u6A5F\u56DE\u6536\u6876\uFF0C\u4E0D\u9023\u7DDA\u96F2\u7AEF\u3002");
       } else if (val === "upload-delete") {
         modeDesc.setText("\u{1F4A1} \u589E\u91CF\u63A8\u9001\u5E36\u522A\u9664\uFF1A\u5C07\u672C\u6A5F\u65B0\u589E\u6216\u4FEE\u6539\u63A8\u9001\u5230\u96F2\u7AEF\uFF0C\u4E26\u628A\u672C\u6A5F\u5DF2\u522A\u9664\u7684\u9060\u7AEF\u6A94\u6848\u79FB\u5165\u96F2\u7AEF\u5783\u573E\u6876\u3002\u9069\u5408\u4EE5\u672C\u6A5F\u70BA\u6E96\u7684\u93E1\u50CF\u540C\u6B65\u3002");
       } else if (val === "download-delete") {
@@ -3454,7 +3521,8 @@ var SyncSaveSettingsTab = class extends import_obsidian6.PluginSettingTab {
       this.plugin.saveSettings();
     });
     const updateDeleteDestinationVisibility = (mode) => {
-      localDeleteSetting.style.display = mode === "download-delete" ? "" : "none";
+      localDeleteSetting.style.display = mode === "download-delete" || mode === "local-cleanup" ? "" : "none";
+      remoteDeleteNote.style.display = mode === "local-cleanup" ? "none" : "";
     };
     updateDeleteDestinationVisibility(this.plugin.settings.syncMode || "bidirectional");
     modeSelect.addEventListener("change", () => updateDeleteDestinationVisibility(modeSelect.value));
@@ -3877,6 +3945,36 @@ var SyncSavePlugin = class extends import_obsidian7.Plugin {
       return;
     }
     const enabled = this.settings.enabledProviders;
+    if (this.settings.syncMode === "local-cleanup") {
+      this.isCurrentlySyncing = true;
+      const encryption2 = new Encryption(this.settings.encryptionPassword);
+      try {
+        const syncService = new SyncService(this.app.vault, {
+          provider: void 0,
+          encryption: encryption2,
+          vaultName: this.app.vault.getName(),
+          syncOnSave: this.settings.syncOnSave,
+          syncInterval: this.settings.syncInterval,
+          skipHidden: this.settings.skipHidden,
+          skipPaths: this.settings.skipPaths,
+          conflictStrategy: this.settings.conflictStrategy,
+          syncConfig: this.settings.syncConfig,
+          syncMode: "local-cleanup",
+          localDeleteDestination: this.settings.localDeleteDestination,
+          largeChangeThreshold: this.settings.largeChangeThreshold,
+          trashRetentionDays: this.settings.trashRetentionDays
+        });
+        syncService.on((event) => this.handleSyncEvent({
+          ...event,
+          message: `[LOCAL] ${event.message}`,
+          providerId: "local"
+        }));
+        await syncService.sync();
+      } finally {
+        this.isCurrentlySyncing = false;
+      }
+      return;
+    }
     if (!enabled || enabled.length === 0) {
       new import_obsidian7.Notice("\u540C\u6B65\u5099\u4EFD\uFF1A\u5C1A\u672A\u555F\u7528\u4EFB\u4F55\u96F2\u7AEF\u670D\u52D9");
       return;
