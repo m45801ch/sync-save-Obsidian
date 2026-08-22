@@ -10,6 +10,7 @@ import {
   SyncPlan,
 } from "./SyncPlanner";
 import { findPublicDuplicatePaths, isPublicPath } from "./PublicDuplicateCleanup";
+import { findDuplicatePublicPaths } from "./LocalDatabaseCleanup";
 
 const MANIFEST_PATH = ".sync-manifest.json";
 const TRASH_ROOT = ".sync-trash";
@@ -115,10 +116,18 @@ export class SyncService {
     this.currentSummary = { total: 0, success: 0, failed: 0, trashed: 0 };
     this.emit({ type: "sync-start", message: "Starting sync..." });
 
+    let providerConnected = false;
     try {
+      if (this.getSyncMode() === "local-cleanup") {
+        await this.cleanupLocalDatabase();
+        this.lastSyncTime = Date.now();
+        this.emit({ type: "sync-complete", message: "Local database cleanup completed" });
+        return;
+      }
       if (!await this.provider.connect()) {
         throw new Error("Failed to connect to cloud provider");
       }
+      providerConnected = true;
 
       const plan = await this.createPlan();
       this.currentSummary.total = plan.actions.length;
@@ -160,7 +169,7 @@ export class SyncService {
       }
       this.isSyncing = false;
       try {
-        await this.provider.disconnect();
+        if (providerConnected) await this.provider.disconnect();
       } catch {}
     }
   }
@@ -275,6 +284,28 @@ export class SyncService {
   private isPublicCleanupMode(): boolean {
     const mode = this.getSyncMode();
     return mode === "bidirectional" || mode === "download-only" || mode === "download-delete";
+  }
+
+  private async cleanupLocalDatabase(): Promise<void> {
+    const paths = this.vault.getFiles().map((file) => file.path);
+    if (this.currentSummary) this.currentSummary.total = paths.length;
+    const duplicates = findDuplicatePublicPaths(paths);
+
+    for (const path of duplicates) {
+      try {
+        if (this.options.localDeleteDestination === "obsidian-trash") {
+          await this.vault.adapter.trashLocal(path);
+        } else {
+          await this.vault.adapter.trashSystem(path);
+        }
+        this.recordSuccess();
+        if (this.currentSummary) this.currentSummary.trashed++;
+        this.emit({ type: "sync-file", message: `本地重複 public/ 檔案已移至回收桶：${path}`, file: path });
+      } catch (error) {
+        this.recordFailure();
+        this.emit({ type: "sync-error", message: `移動本地 public/ 重複檔案至回收桶失敗：${path}（${error instanceof Error ? error.message : String(error)}）`, file: path });
+      }
+    }
   }
 
   private recordSuccess(actionType?: SyncAction["type"]): void {
