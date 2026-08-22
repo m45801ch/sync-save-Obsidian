@@ -1,11 +1,9 @@
-const PUBLIC_PREFIX = "public/";
-
 function normalizePath(path: string): string {
   return path.replace(/\\/g, "/");
 }
 
-function isUnderPublic(path: string): boolean {
-  return normalizePath(path).startsWith(PUBLIC_PREFIX);
+function isRootFile(path: string): boolean {
+  return !normalizePath(path).includes("/");
 }
 
 function baseName(path: string): string {
@@ -23,8 +21,8 @@ export function findDuplicatePublicPaths(paths: string[]): string[] {
   }
 
   return paths.filter((path) => {
-    if (!isUnderPublic(path)) return false;
+    if (!isRootFile(path)) return false;
     const name = baseName(path);
-    return (grouped.get(name) ?? []).some((otherPath) => !isUnderPublic(otherPath));
+    return (grouped.get(name) ?? []).some((otherPath) => !isRootFile(otherPath));
   });
 }

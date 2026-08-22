@@ -229,12 +229,11 @@ function findPublicDuplicatePaths(paths, candidates) {
 }
 
 // src/sync/LocalDatabaseCleanup.ts
-var PUBLIC_PREFIX2 = "public/";
 function normalizePath(path) {
   return path.replace(/\\/g, "/");
 }
-function isUnderPublic2(path) {
-  return normalizePath(path).startsWith(PUBLIC_PREFIX2);
+function isRootFile(path) {
+  return !normalizePath(path).includes("/");
 }
 function baseName2(path) {
   const normalized = normalizePath(path);
@@ -251,10 +250,10 @@ function findDuplicatePublicPaths(paths) {
   }
   return paths.filter((path) => {
     var _a2;
-    if (!isUnderPublic2(path))
+    if (!isRootFile(path))
       return false;
     const name = baseName2(path);
-    return ((_a2 = grouped.get(name)) != null ? _a2 : []).some((otherPath) => !isUnderPublic2(otherPath));
+    return ((_a2 = grouped.get(name)) != null ? _a2 : []).some((otherPath) => !isRootFile(otherPath));
   });
 }
 
@@ -3447,7 +3446,7 @@ var SyncSaveSettingsTab = class extends import_obsidian6.PluginSettingTab {
       } else if (val === "download-only") {
         modeDesc.setText("\u{1F4A1} \u55AE\u5411\u56DE\u5FA9\uFF1A\u5C07\u96F2\u7AEF\u6A94\u6848\u55AE\u5411\u540C\u6B65\u4E0B\u8F09\u4E26\u8986\u84CB\u81F3\u672C\u6A5F\uFF0C\u4E0D\u767C\u9001\u672C\u6A5F\u7684\u4EFB\u4F55\u4FEE\u6539\u3002\u9069\u5408\u5728\u5168\u65B0\u88DD\u7F6E\u4E0A\u9032\u884C\u521D\u59CB\u9084\u539F\u3002");
       } else if (val === "local-cleanup") {
-        modeDesc.setText("\u{1F4A1} \u6574\u7406\u672C\u5730\u8CC7\u6599\u5EAB\uFF1A\u53EA\u6383\u63CF\u672C\u5730 Vault\uFF0C\u4EE5\u6A94\u540D\u627E\u51FA\u91CD\u8907\u6A94\u6848\uFF0C\u4FDD\u7559\u5206\u985E\u8CC7\u6599\u593E\u7684\u6A94\u6848\uFF0C\u5C07 public/\uFF08\u542B\u5B50\u8CC7\u6599\u593E\uFF09\u7684\u91CD\u8907\u6A94\u79FB\u81F3\u672C\u6A5F\u56DE\u6536\u6876\uFF0C\u4E0D\u9023\u7DDA\u96F2\u7AEF\u3002");
+        modeDesc.setText("\u{1F4A1} \u6574\u7406\u672C\u5730\u8CC7\u6599\u5EAB\uFF1A\u6383\u63CF\u672C\u5730 Vault\uFF0C\u4EE5\u6A94\u540D\u627E\u51FA\u6839\u76EE\u9304\u6A94\u6848\u8207\u5B50\u8CC7\u6599\u593E\u7684\u91CD\u8907\uFF0C\u4FDD\u7559\u5206\u985E\u8CC7\u6599\u593E\u7684\u6A94\u6848\uFF0C\u5C07\u6839\u76EE\u9304\u6A94\u6848\u79FB\u81F3\u672C\u6A5F\u56DE\u6536\u6876\uFF0C\u4E0D\u9023\u7DDA\u96F2\u7AEF\u3002");
       } else if (val === "upload-delete") {
         modeDesc.setText("\u{1F4A1} \u589E\u91CF\u63A8\u9001\u5E36\u522A\u9664\uFF1A\u5C07\u672C\u6A5F\u65B0\u589E\u6216\u4FEE\u6539\u63A8\u9001\u5230\u96F2\u7AEF\uFF0C\u4E26\u628A\u672C\u6A5F\u5DF2\u522A\u9664\u7684\u9060\u7AEF\u6A94\u6848\u79FB\u5165\u96F2\u7AEF\u5783\u573E\u6876\u3002\u9069\u5408\u4EE5\u672C\u6A5F\u70BA\u6E96\u7684\u93E1\u50CF\u540C\u6B65\u3002");
       } else if (val === "download-delete") {
